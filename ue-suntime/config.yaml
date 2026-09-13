@@ -1,0 +1,68 @@
+mcp:
+  # UE ModelContextProtocol 插件暴露的 HTTP 端点
+  url: "http://127.0.0.1:8000/mcp"
+
+llm:
+  # deepseek | qwen | glm，均为 OpenAI 兼容接口
+  provider: deepseek
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+  api_key_env: DEEPSEEK_API_KEY
+  temperature: 0.2
+  timeout: 60
+  # 只负责把自然语言解析成 地点/经纬度/时间，不参与物理计算与写值
+
+lighting:
+  # 关卡的方位约定：
+  #   y -> X=East,  Y=North（UE 常见约定）
+  #   x -> X=North, Y=East
+  north_axis: "y"
+
+  # 照度 -> 强度的响应曲线：
+  #   linear      纯物理线性映射，黄昏/夜间数值很低（需场景启用自动曝光才好看）
+  #   perceptual  以正午为参考点做幂律压缩，模拟人眼自适应，视觉更接近现场观感
+  response: "perceptual"
+  perceptual_gamma: 0.6
+
+  # 参考点：正午晴天时地面直射约 100000 lux 对应 UE 平行光 10；天空散射约 10000 lux 对应天光 1
+  sun_reference_lux: 100000
+  sun_reference_intensity: 10
+  sky_reference_lux: 10000
+  sky_reference_intensity: 1.0
+
+  # 物理照度(lux) -> UE 灯光强度 的全局缩放
+  intensity_scale: 1.0
+
+  # temperature: 写 temperature + bUseTemperature=true（需引擎支持黑体色温）
+  # rgb:          写 lightColor 线性色（兼容性最好，天光只能走这个）
+  color_mode: "temperature"
+
+  # 强度上下限，防止极端值把场景打爆
+  sun_min_intensity: 0.05
+  sun_max_intensity: 20.0
+  sky_min_intensity: 0.02
+  sky_max_intensity: 6.0
+
+  # 色温偏移(K)，用于艺术微调：最终色温 = 物理值 + 偏移
+  sun_cct_offset: 0
+  sky_cct_offset: 0
+
+weather:
+  # 通过 Open-Meteo 查询该时刻云量，用于修正直射/散射比例
+  # 关闭或查询失败时按晴天处理
+  enabled: true
+  timeout: 10
+
+targets:
+  sun:
+    name_hint: "DirectionalLight"
+    component_keyword: "LightComponent"
+    apply_rotation: true
+    apply_intensity: true
+    apply_color: true
+  sky:
+    name_hint: "SkyLight"
+    component_keyword: "SkyLightComponent"
+    apply_rotation: false
+    apply_intensity: true
+    apply_color: true
