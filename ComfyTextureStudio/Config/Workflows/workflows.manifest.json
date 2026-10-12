@@ -1,0 +1,996 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-12T21:22:03+08:00",
+  "plugin": {
+    "name": "ComfyTextureStudio",
+    "shortName": "CTS",
+    "modules": [
+      "ComfyTextureStudio",
+      "ComfyTextureStudioEditor"
+    ]
+  },
+  "_comment": "语义槽位清单：C++ 侧只按 semantic key 读写参数，永不硬编码 node id。address 格式与 `comfy workflow slots` 的 address 一致。",
+  "source": {
+    "workflow": "comfyUI_tools/workflows/sdxl_sand_pbr_v2_geom.json",
+    "format": "frontend",
+    "sha256": "8a1ef951df2ab00a96a95dbe04d6416ccb198f376d05404ab6b4f1f73c3eb96c",
+    "bytes": 73211,
+    "nodeCount": 43,
+    "linkCount": 46,
+    "frontendVersion": "1.53.6"
+  },
+  "environment": {
+    "comfyuiVersion": "0.38.2",
+    "comfyuiCommit": "daeb5e53",
+    "comfyCliVersion": "1.22.0",
+    "serverUrl": "http://127.0.0.1:8000",
+    "comfyUserDataDir": "C:/Users/1142/AppData/Local/Programs/ComfyUI-data",
+    "gpu": "NVIDIA GeForce RTX 5090 D v2",
+    "vramBytes": 25642926056
+  },
+  "requiredCustomNodePacks": [
+    {
+      "name": "comfyui_seamless_texture",
+      "version": "1.3.0",
+      "license": "MIT",
+      "nodeCount": 18,
+      "vendored": true,
+      "vendoredPath": "Resources/comfyui_seamless_texture",
+      "vendoredAt": "2026-10-12",
+      "sourcePath": "D:/PersonalDocuments/hongxuan_document/comfyUI_tools/custom_nodes/comfyui_seamless_texture",
+      "pipDependencies": [],
+      "externalRequirements": [
+        {
+          "name": "comfyui_controlnet_aux",
+          "required": true,
+          "reason": "geometry.py:348 从 custom_controlnet_aux.dsine 导入 load_checkpoint 与 DSINE 架构"
+        },
+        {
+          "name": "dsine.pt",
+          "required": true,
+          "notes": "SeamlessDSINENormal 的权重",
+          "expectedBytes": 291298581,
+          "defaultPath": "<custom_nodes>/comfyui_controlnet_aux/ckpts/hr16/Diffusion-Edge/dsine.pt",
+          "envOverride": "SEAMLESS_DSINE_WEIGHTS",
+          "autoDownload": false,
+          "fetchHint": "curl -skL -m 900 https://hf-mirror.com/hr16/Diffusion-Edge/resolve/main/dsine.pt -o <path>"
+        },
+        {
+          "name": "Pillow",
+          "required": false,
+          "reason": "仅 materials.py 的 SeamlessMaterialsFromAlbedo 使用，本流程不引用该节点"
+        }
+      ],
+      "usedNodes": [
+        "SeamlessModelPadding",
+        "SeamlessVAEDecode",
+        "SeamlessDSINENormal",
+        "SeamlessFlattenNormal",
+        "SeamlessHeightFromNormal",
+        "SeamlessNormalFromHeight",
+        "SeamlessAOFromHeight",
+        "SeamlessRoughnessFromHeight",
+        "SeamlessDelightAlbedo",
+        "PackPBRChannels"
+      ]
+    }
+  ],
+  "decisions": {
+    "_comment": "PRD v1.1 已确认的设计决策。修改任一项需同步更新 docs/PRD.md 与 docs/workflow-interface.md。",
+    "D1_splitTwoStageApiGraphs": {
+      "value": true,
+      "note": "拆成两张独立 API 图，阶段 B 用 LoadImage 取代 node 8"
+    },
+    "D2_pruneMoGeBranch": {
+      "value": true,
+      "prunedCount": 20,
+      "note": "裁掉 MoGe 对照支路 + 全部 TilePreview/自检 + MarkdownNote + node 44 调试输出"
+    },
+    "D3_flipNormalGreenInUE": {
+      "value": true,
+      "comfyDirectxSlot": "50.directx",
+      "comfyDirectxValue": false,
+      "ueFlipGreenChannel": true,
+      "note": "ComfyUI 保持 OpenGL 输出，绿通道交给 UE 导入设置翻"
+    },
+    "Q1_pluginName": "ComfyTextureStudio",
+    "Q2_keepNormalDsineDebugOutput": false,
+    "Q3_ormMode": "packed",
+    "Q4_heightUsage": "bumpOffsetParallax",
+    "Q5_jobQueue": false,
+    "Q6_namingMode": "templateAndManual",
+    "Q7_allowLoraSwap": true,
+    "Q8_vendorNodePack": true
+  },
+  "stages": {
+    "stageA": {
+      "displayName": "生成基础贴图",
+      "workflowFile": "stage_a_base_texture.json",
+      "nodeCount": 9,
+      "keptNodeIds": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        20
+      ],
+      "outputNodeIds": {
+        "baseTexture": 20
+      },
+      "outputAssets": [
+        {
+          "semantic": "baseTexture",
+          "comfyType": "lit render",
+          "note": "受光渲染图，严格四方连续。不是 albedo。",
+          "ue": {
+            "importable": false,
+            "reason": "中间产物，仅用于审阅与作为阶段 B 的输入"
+          }
+        }
+      ],
+      "slots": {
+        "model": {
+          "address": "1.ckpt_name",
+          "type": "COMBO",
+          "default": "sd_xl_base_1.0.safetensors",
+          "enum": [
+            "sam3.1_multiplex_fp16.safetensors",
+            "sd_xl_base_1.0.safetensors",
+            "v1-5-pruned-emaonly-fp16.safetensors"
+          ],
+          "ui": {
+            "visible": true,
+            "group": "model",
+            "label": "基础模型"
+          }
+        },
+        "lora": {
+          "address": "2.lora_name",
+          "type": "COMBO",
+          "default": "sdxl-texture-sand-lora-v2.safetensors",
+          "enum": [
+            "sdxl-texture-sand-lora-v1-000004.safetensors",
+            "sdxl-texture-sand-lora-v2-000010.safetensors",
+            "sdxl-texture-sand-lora-v2-000013.safetensors",
+            "sdxl-texture-sand-lora-v2.safetensors"
+          ],
+          "enumSource": "runtime:/object_info",
+          "ui": {
+            "visible": true,
+            "group": "model",
+            "label": "材质 LoRA",
+            "note": "决策 Q7：预留换 LoRA 通道。枚举从 /object_info 实时拉取，不硬编码，换成非沙地 LoRA 也能直接选。"
+          }
+        },
+        "loraModelStrength": {
+          "address": "2.strength_model",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "model",
+            "label": "LoRA 模型强度"
+          }
+        },
+        "loraClipStrength": {
+          "address": "2.strength_clip",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "model",
+            "label": "LoRA CLIP 强度"
+          }
+        },
+        "positive": {
+          "address": "3.text",
+          "type": "STRING",
+          "default": "mtrlx, seamless tileable PBR material, coarse pebbly sand, beige and grey small stones, dense gravel aggregate, square top-down surface, directional sunlight from upper left, visible bump relief with soft cast shadows, raking light, crisp fine detail, high frequency texture, small scale pattern",
+          "ui": {
+            "visible": true,
+            "group": "prompt",
+            "label": "正向提示词",
+            "multiline": true,
+            "frozenPrefix": "mtrlx, seamless tileable PBR material, ",
+            "frozenSuffix": ", square top-down surface, directional sunlight from upper left, visible bump relief with soft cast shadows, raking light, crisp fine detail, high frequency texture, small scale pattern",
+            "userEditableMiddle": "coarse pebbly sand, beige and grey small stones, dense gravel aggregate",
+            "warning": "前缀与后缀来自 LoRA 训练集（受光渲染版），必须保留，否则起伏信息会丢失。换 LoRA 时这两段也需要一并替换。"
+          }
+        },
+        "negative": {
+          "address": "4.text",
+          "type": "STRING",
+          "default": "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, overcast, flat lighting, front lighting, lighting gradient, vignette, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border, depth map, normal map, displacement map, uv checker",
+          "ui": {
+            "visible": true,
+            "group": "prompt",
+            "label": "负向提示词",
+            "multiline": true,
+            "collapsedByDefault": true,
+            "warning": "末尾 5 项（tiling seam / visible grid / tile border / depth map / normal map / displacement map / uv checker）是压制接缝类伪影的关键，不要删。"
+          }
+        },
+        "width": {
+          "address": "5.width",
+          "type": "INT",
+          "default": 1024,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "宽度"
+          }
+        },
+        "height": {
+          "address": "5.height",
+          "type": "INT",
+          "default": 1024,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "高度"
+          }
+        },
+        "batchSize": {
+          "address": "5.batch_size",
+          "type": "INT",
+          "default": 1,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "批次数"
+          }
+        },
+        "paddingMode": {
+          "address": "6.mode",
+          "type": "COMBO",
+          "default": "circular",
+          "enum": [
+            "circular",
+            "off"
+          ],
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "UNet 环面 padding",
+            "readOnly": true,
+            "warning": "这是四方连续的来源，改了整条链路的前提就没了。"
+          }
+        },
+        "seed": {
+          "address": "7.seed",
+          "type": "INT",
+          "default": 20261013,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "种子",
+            "hasRandomize": true,
+            "hasLock": true
+          }
+        },
+        "steps": {
+          "address": "7.steps",
+          "type": "INT",
+          "default": 30,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "步数"
+          }
+        },
+        "cfg": {
+          "address": "7.cfg",
+          "type": "FLOAT",
+          "default": 6.5,
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "CFG"
+          }
+        },
+        "sampler": {
+          "address": "7.sampler_name",
+          "type": "COMBO",
+          "default": "dpmpp_2m",
+          "enum": [
+            "euler",
+            "euler_cfg_pp",
+            "euler_ancestral",
+            "euler_ancestral_cfg_pp",
+            "heun",
+            "heunpp2",
+            "exp_heun_2_x0",
+            "exp_heun_2_x0_sde",
+            "dpm_2",
+            "dpm_2_ancestral",
+            "lms",
+            "dpm_fast",
+            "dpm_adaptive",
+            "dpmpp_2s_ancestral",
+            "dpmpp_2s_ancestral_cfg_pp",
+            "dpmpp_sde",
+            "dpmpp_sde_gpu",
+            "dpmpp_2m",
+            "dpmpp_2m_cfg_pp",
+            "dpmpp_2m_sde",
+            "dpmpp_2m_sde_gpu",
+            "dpmpp_2m_sde_heun",
+            "dpmpp_2m_sde_heun_gpu",
+            "dpmpp_3m_sde",
+            "dpmpp_3m_sde_gpu",
+            "ddpm",
+            "lcm",
+            "ipndm",
+            "ipndm_v",
+            "deis",
+            "cfgpp_ud10_ab",
+            "res_multistep",
+            "res_multistep_cfg_pp",
+            "res_multistep_ancestral",
+            "res_multistep_ancestral_cfg_pp",
+            "gradient_estimation",
+            "gradient_estimation_cfg_pp",
+            "er_sde",
+            "seeds_2",
+            "seeds_3",
+            "sa_solver",
+            "sa_solver_pece",
+            "ddim",
+            "uni_pc",
+            "uni_pc_bh2"
+          ],
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "采样器"
+          }
+        },
+        "scheduler": {
+          "address": "7.scheduler",
+          "type": "COMBO",
+          "default": "karras",
+          "enum": [
+            "simple",
+            "sgm_uniform",
+            "karras",
+            "exponential",
+            "ddim_uniform",
+            "beta",
+            "normal",
+            "linear_quadratic",
+            "kl_optimal"
+          ],
+          "ui": {
+            "visible": true,
+            "group": "sampling",
+            "label": "调度器"
+          }
+        },
+        "denoise": {
+          "address": "7.denoise",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": false,
+            "group": "sampling",
+            "label": "降噪强度",
+            "advanced": true
+          }
+        },
+        "vaeMargin": {
+          "address": "8.margin",
+          "type": "INT",
+          "default": 8,
+          "ui": {
+            "visible": true,
+            "group": "advanced",
+            "label": "VAE 环形 padding 边距",
+            "advanced": true
+          }
+        },
+        "outPrefix": {
+          "address": "20.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_lit",
+          "runtimeValuePattern": "cts/{jobId}/stage_a_base",
+          "ui": {
+            "visible": false,
+            "label": "输出前缀",
+            "autoManaged": true
+          }
+        }
+      },
+      "apiWorkflowFile": "stage_a_base_texture.json",
+      "apiNodeCount": 9
+    },
+    "stageB": {
+      "displayName": "生成 PBR 全套",
+      "workflowFile": "stage_b_pbr.json",
+      "nodeCount": 15,
+      "keptNodeIds": [
+        "{inputNode}",
+        35,
+        36,
+        40,
+        50,
+        60,
+        61,
+        62,
+        70,
+        41,
+        54,
+        63,
+        64,
+        65,
+        71
+      ],
+      "inputNodeId": "75",
+      "inputNodeToken": "{inputNode}",
+      "inputNodeNote": "阶段 B 的 LoadImage 节点是**导出时新增**的，id = 源图最大 id + 1，由 Tools/export_api_workflows.py 写入实际值。manifest 里一律用符号 token `{inputNode}`，不写死数字。",
+      "splitPoint": {
+        "replacedNode": 8,
+        "replacedNodeType": "SeamlessVAEDecode",
+        "edges": [
+          {
+            "from": "8.out0",
+            "to": "35.in0"
+          },
+          {
+            "from": "8.out0",
+            "to": "70.in0"
+          }
+        ],
+        "note": "这两条边是阶段 A 与阶段 B 之间的全部耦合。拆分为 LoadImage 后必须同时接到 35 与 70。"
+      },
+      "outputNodeIds": {
+        "albedo": 71,
+        "normal": 54,
+        "height": 41,
+        "ao": 63,
+        "roughness": 64,
+        "orm": 65
+      },
+      "outputAssets": [
+        {
+          "semantic": "albedo",
+          "nodeId": 71,
+          "comfyType": "IMAGE",
+          "isDeliverable": true,
+          "ue": {
+            "suffix": "_BC",
+            "role": "BaseColor",
+            "compressionSettings": "TC_Default",
+            "srgb": true,
+            "flipGreenChannel": false,
+            "lodGroup": "TEXTUREGROUP_World",
+            "addressMode": "TA_WRAP",
+            "importByDefault": true
+          }
+        },
+        {
+          "semantic": "normal",
+          "nodeId": 54,
+          "comfyType": "IMAGE",
+          "isDeliverable": true,
+          "ue": {
+            "suffix": "_N",
+            "role": "Normal",
+            "compressionSettings": "TC_Normalmap",
+            "srgb": false,
+            "flipGreenChannel": true,
+            "lodGroup": "TEXTUREGROUP_WorldNormalMap",
+            "addressMode": "TA_WRAP",
+            "importByDefault": true,
+            "warning": "ComfyUI 侧输出 OpenGL 约定（50.directx=false），UE 需要 DirectX ⇒ 必须 FlipGreenChannel=true。不翻的表现是凹凸方向反，肉眼不易察觉。"
+          }
+        },
+        {
+          "semantic": "orm",
+          "nodeId": 65,
+          "comfyType": "IMAGE",
+          "isDeliverable": true,
+          "ue": {
+            "suffix": "_ORM",
+            "role": "R=AmbientOcclusion, G=Roughness, B=Metallic",
+            "compressionSettings": "TC_Masks",
+            "srgb": false,
+            "flipGreenChannel": false,
+            "lodGroup": "TEXTUREGROUP_World",
+            "addressMode": "TA_WRAP",
+            "importByDefault": true,
+            "warning": "srgb 必须为 false，否则 AO/粗糙度/金属度会被 gamma 整体拉偏。决策 Q3：使用合并图，AO/Roughness 不单独接进材质。"
+          }
+        },
+        {
+          "semantic": "height",
+          "nodeId": 41,
+          "comfyType": "IMAGE",
+          "isDeliverable": true,
+          "ue": {
+            "suffix": "_H",
+            "role": "BumpOffset 视差高度",
+            "compressionSettings": "TC_Grayscale",
+            "srgb": false,
+            "flipGreenChannel": false,
+            "lodGroup": "TEXTUREGROUP_World",
+            "addressMode": "TA_WRAP",
+            "importByDefault": true,
+            "usage": "bumpOffsetParallax",
+            "note": "决策 Q4：接入 BumpOffset。Height 输入取 height 贴图，BumpDepth 为暴露的标量参数，其输出同时接到 BaseColor/Normal/ORM 三个采样的 UV 偏移。Nanite Tessellation 真位移列为后续可选（M4）。"
+          }
+        },
+        {
+          "semantic": "ao",
+          "nodeId": 63,
+          "comfyType": "IMAGE",
+          "isDeliverable": false,
+          "ue": {
+            "suffix": "_AO",
+            "role": "orphan",
+            "compressionSettings": "TC_Grayscale",
+            "srgb": false,
+            "flipGreenChannel": false,
+            "lodGroup": "TEXTUREGROUP_World",
+            "addressMode": "TA_WRAP",
+            "importByDefault": false,
+            "orphanReason": "决策 Q3：ORM 合并图已含 AO，此图默认不导入、不接材质。仅在用户显式勾选时导入。"
+          }
+        },
+        {
+          "semantic": "roughness",
+          "nodeId": 64,
+          "comfyType": "IMAGE",
+          "isDeliverable": false,
+          "ue": {
+            "suffix": "_R",
+            "role": "orphan",
+            "compressionSettings": "TC_Grayscale",
+            "srgb": false,
+            "flipGreenChannel": false,
+            "lodGroup": "TEXTUREGROUP_World",
+            "addressMode": "TA_WRAP",
+            "importByDefault": false,
+            "orphanReason": "决策 Q3：ORM 合并图已含 Roughness，此图默认不导入、不接材质。仅在用户显式勾选时导入。"
+          }
+        }
+      ],
+      "slots": {
+        "inputImage": {
+          "address": "{inputNode}.image",
+          "type": "STRING",
+          "default": "",
+          "runtimeValuePattern": "cts_{jobId}.png",
+          "ui": {
+            "visible": false,
+            "label": "输入贴图",
+            "autoManaged": true
+          }
+        },
+        "dsineFov": {
+          "address": "35.fov",
+          "type": "FLOAT",
+          "default": 3.0,
+          "min": 0.5,
+          "max": 120.0,
+          "step": 0.5,
+          "ui": {
+            "visible": true,
+            "group": "geometry",
+            "label": "DSINE FOV（度）",
+            "warning": "必须压到接近正交（默认 3°）补边才有效。fov=60 时补边完全无效甚至更差（环绕倍数 6.87→5.45）。不要随意调大。"
+          }
+        },
+        "dsinePad": {
+          "address": "35.pad",
+          "type": "INT",
+          "default": 256,
+          "min": 0,
+          "max": 1024,
+          "step": 32,
+          "ui": {
+            "visible": true,
+            "group": "geometry",
+            "label": "DSINE 周期补边",
+            "advanced": true
+          }
+        },
+        "dsineIterations": {
+          "address": "35.iterations",
+          "type": "INT",
+          "default": 5,
+          "min": 1,
+          "max": 20,
+          "ui": {
+            "visible": true,
+            "group": "geometry",
+            "label": "DSINE 迭代次数",
+            "advanced": true
+          }
+        },
+        "dsineFlipRed": {
+          "address": "35.flip_red",
+          "type": "BOOLEAN",
+          "default": true,
+          "ui": {
+            "visible": true,
+            "group": "advanced",
+            "label": "翻转红通道（相机系→OpenGL）",
+            "advanced": true,
+            "warning": "实测标定值。std/tilt 这类标量统计量对通道翻转完全不敏感，改错了肉眼也看不出来。非必要勿动。"
+          }
+        },
+        "dsineUseFp16": {
+          "address": "35.use_fp16",
+          "type": "BOOLEAN",
+          "default": false,
+          "ui": {
+            "visible": true,
+            "group": "advanced",
+            "label": "DSINE 使用 FP16",
+            "advanced": true
+          }
+        },
+        "flattenReliefScale": {
+          "address": "36.relief_scale",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "geometry",
+            "label": "起伏缩放"
+          }
+        },
+        "flatten": {
+          "address": "36.flatten",
+          "type": "BOOLEAN",
+          "default": true,
+          "ui": {
+            "visible": true,
+            "group": "geometry",
+            "label": "整平全局倾斜"
+          }
+        },
+        "heightLowFreqRadius": {
+          "address": "40.low_freq_radius",
+          "type": "INT",
+          "default": 96,
+          "ui": {
+            "visible": true,
+            "group": "height",
+            "label": "低频剔除半径（px）",
+            "warning": "不做低频剔除会出现碗形大偏置，梯度被压 35–50 倍，平铺时每块重复一个斑块。"
+          }
+        },
+        "heightInvert": {
+          "address": "40.invert",
+          "type": "BOOLEAN",
+          "default": false,
+          "ui": {
+            "visible": true,
+            "group": "height",
+            "label": "高度反向"
+          }
+        },
+        "heightHeadroom": {
+          "address": "40.headroom",
+          "type": "FLOAT",
+          "default": 0.15,
+          "ui": {
+            "visible": true,
+            "group": "height",
+            "label": "归一化 headroom",
+            "warning": "必须 > 0。硬截断会产生零梯度死平面（实测旧版 1695 px 的平块，肉眼就是石块顶被切平）。改这个值要同步改 bump_strength。"
+          }
+        },
+        "bumpStrength": {
+          "address": "50.bump_strength",
+          "type": "FLOAT",
+          "default": 31.4,
+          "ui": {
+            "visible": true,
+            "group": "height",
+            "label": "高度→法线强度",
+            "dependsOn": "40.headroom",
+            "note": "headroom=0.15 下的等价幅度。旧硬截断版本此值为 22。"
+          }
+        },
+        "normalDirectx": {
+          "address": "50.directx",
+          "type": "BOOLEAN",
+          "default": false,
+          "ui": {
+            "visible": true,
+            "group": "advanced",
+            "label": "输出 DirectX 法线（在 ComfyUI 侧翻）",
+            "advanced": true,
+            "warning": "决策 D3：保持 false。绿通道交给 UE 导入设置翻（bFlipGreenChannel），源 PNG 更可移植。"
+          }
+        },
+        "aoRadius": {
+          "address": "60.radius",
+          "type": "INT",
+          "default": 24,
+          "ui": {
+            "visible": true,
+            "group": "ao",
+            "label": "AO 半径"
+          }
+        },
+        "aoScales": {
+          "address": "60.scales",
+          "type": "INT",
+          "default": 4,
+          "ui": {
+            "visible": true,
+            "group": "ao",
+            "label": "AO 多尺度层数"
+          }
+        },
+        "aoStrength": {
+          "address": "60.strength",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "ao",
+            "label": "AO 强度"
+          }
+        },
+        "aoGamma": {
+          "address": "60.gamma",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "ao",
+            "label": "AO gamma",
+            "advanced": true
+          }
+        },
+        "aoSmooth": {
+          "address": "60.smooth",
+          "type": "INT",
+          "default": 2,
+          "ui": {
+            "visible": true,
+            "group": "ao",
+            "label": "AO 平滑",
+            "advanced": true
+          }
+        },
+        "roughWindow": {
+          "address": "61.window",
+          "type": "INT",
+          "default": 12,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "粗糙度窗口"
+          }
+        },
+        "roughMin": {
+          "address": "61.min_roughness",
+          "type": "FLOAT",
+          "default": 0.55,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "最小粗糙度"
+          }
+        },
+        "roughMax": {
+          "address": "61.max_roughness",
+          "type": "FLOAT",
+          "default": 0.95,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "最大粗糙度"
+          }
+        },
+        "roughGamma": {
+          "address": "61.gamma",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "粗糙度 gamma",
+            "advanced": true
+          }
+        },
+        "roughInvert": {
+          "address": "61.invert",
+          "type": "BOOLEAN",
+          "default": false,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "粗糙度反向"
+          }
+        },
+        "metalness": {
+          "address": "62.metalness_value",
+          "type": "FLOAT",
+          "default": 0.0,
+          "ui": {
+            "visible": true,
+            "group": "roughness",
+            "label": "金属度",
+            "note": "砂石是电介质 ⇒ 0。换金属/潮湿材质才需要改。"
+          }
+        },
+        "delightRadius": {
+          "address": "70.radius",
+          "type": "INT",
+          "default": 128,
+          "ui": {
+            "visible": true,
+            "group": "albedo",
+            "label": "去光照平场半径"
+          }
+        },
+        "delightAmount": {
+          "address": "70.amount",
+          "type": "FLOAT",
+          "default": 1.0,
+          "ui": {
+            "visible": true,
+            "group": "albedo",
+            "label": "去光照强度"
+          }
+        },
+        "delightPreserveMean": {
+          "address": "70.preserve_mean",
+          "type": "BOOLEAN",
+          "default": true,
+          "ui": {
+            "visible": true,
+            "group": "albedo",
+            "label": "保持均值"
+          }
+        },
+        "outPrefixHeight": {
+          "address": "41.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_height",
+          "runtimeValuePattern": "cts/{jobId}/height",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        },
+        "outPrefixNormal": {
+          "address": "54.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_normal",
+          "runtimeValuePattern": "cts/{jobId}/normal",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        },
+        "outPrefixAo": {
+          "address": "63.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_ao",
+          "runtimeValuePattern": "cts/{jobId}/ao",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        },
+        "outPrefixRoughness": {
+          "address": "64.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_roughness",
+          "runtimeValuePattern": "cts/{jobId}/roughness",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        },
+        "outPrefixOrm": {
+          "address": "65.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_orm",
+          "runtimeValuePattern": "cts/{jobId}/orm",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        },
+        "outPrefixAlbedo": {
+          "address": "71.filename_prefix",
+          "type": "STRING",
+          "default": "textures/pbr_v2/sand_v2_albedo",
+          "runtimeValuePattern": "cts/{jobId}/albedo",
+          "ui": {
+            "visible": false,
+            "autoManaged": true
+          }
+        }
+      },
+      "apiWorkflowFile": "stage_b_pbr.json",
+      "inputPlaceholder": "__CTS_RUNTIME_INPUT__.png",
+      "apiNodeCount": 15
+    }
+  },
+  "prunedNodes": {
+    "_comment": "被裁掉的 20 个节点。推导方式：全图节点 \\ (阶段A反向可达 ∪ 阶段B反向可达)。禁止手写，必须由 Tools/derive_keepset.py 重算。",
+    "ids": [
+      10,
+      21,
+      30,
+      31,
+      32,
+      33,
+      34,
+      37,
+      38,
+      39,
+      42,
+      43,
+      44,
+      55,
+      56,
+      66,
+      67,
+      72,
+      73,
+      74
+    ],
+    "reasons": {
+      "10": "MarkdownNote · UI-only",
+      "21": "TilePreview · UE 侧本地拼 2×2 替代",
+      "30": "MoGe 对照支路 · 与交付输出零耦合",
+      "31": "MoGe 对照支路 · 与交付输出零耦合",
+      "32": "MoGe 对照支路 · 与交付输出零耦合",
+      "33": "MoGe 对照支路 · 与交付输出零耦合",
+      "34": "MoGe 对照支路 · 与交付输出零耦合",
+      "37": "MoGe 对照支路 · 与交付输出零耦合",
+      "38": "MoGe 对照支路 · 与交付输出零耦合",
+      "39": "MoGe 对照支路 · 与交付输出零耦合",
+      "42": "TilePreview",
+      "43": "2×2 自检产物",
+      "44": "SaveImage(normal_dsine) · 决策 Q2 —— 不保留调试输出",
+      "55": "TilePreview",
+      "56": "2×2 自检产物",
+      "66": "TilePreview",
+      "67": "2×2 自检产物",
+      "72": "TilePreview",
+      "73": "2×2 自检产物",
+      "74": "PreviewImage · 2×2 自检"
+    }
+  },
+  "validationGate": {
+    "_comment": "进 Config/Workflows/ 前的三层验证，全绿才允许入库。",
+    "layers": [
+      {
+        "name": "结构",
+        "command": "Tools/derive_keepset.py --diff",
+        "pass": "keep/drop 与图内实际节点集合差集为空"
+      },
+      {
+        "name": "schema",
+        "command": "comfy validate --workflow <path>",
+        "pass": "valid == true 且 errors 为空"
+      },
+      {
+        "name": "live",
+        "command": "POST /prompt → poll GET /history/{id}",
+        "pass": "status_str == 'success' 且 outputs 含全部预期节点"
+      }
+    ],
+    "knownValidateBlindSpots": [
+      "不检查缺失的 required 输入",
+      "不检查 COMFY_DYNAMICCOMBO_V3 子输入",
+      "不估算显存分配（大分配可通过校验后在执行期 OOM 掉整个进程）",
+      "过旧的 UI 导出文件可能一个节点都没检查却报 valid: true"
+    ]
+  }
+}

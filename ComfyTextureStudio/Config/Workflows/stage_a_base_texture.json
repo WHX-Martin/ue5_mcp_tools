@@ -1,0 +1,113 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "lora_name": "sdxl-texture-sand-lora-v2.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "1",
+        0
+      ],
+      "clip": [
+        "1",
+        1
+      ]
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "mtrlx, seamless tileable PBR material, coarse pebbly sand, beige and grey small stones, dense gravel aggregate, square top-down surface, directional sunlight from upper left, visible bump relief with soft cast shadows, raking light, crisp fine detail, high frequency texture, small scale pattern",
+      "clip": [
+        "2",
+        1
+      ]
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "blurry, lowres, out of focus, jpeg artifacts, watermark, text, signature, logo, perspective view, side view, overcast, flat lighting, front lighting, lighting gradient, vignette, depth of field, bokeh, flat solid color, cartoon, painting, tiling seam, visible grid, tile border, depth map, normal map, displacement map, uv checker",
+      "clip": [
+        "2",
+        1
+      ]
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "6": {
+    "class_type": "SeamlessModelPadding",
+    "inputs": {
+      "mode": "circular",
+      "model": [
+        "2",
+        0
+      ]
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 20261013,
+      "steps": 30,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": [
+        "6",
+        0
+      ],
+      "positive": [
+        "3",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    }
+  },
+  "8": {
+    "class_type": "SeamlessVAEDecode",
+    "inputs": {
+      "margin": 8,
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    }
+  },
+  "20": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_lit",
+      "images": [
+        "8",
+        0
+      ]
+    }
+  }
+}

@@ -110,3 +110,6 @@ LogFiles/
 
 # ---- CodeBuddy ----
 .codebuddy/*
+
+# ---- WorkBuddy (本地 agent 工作记忆，含本机绝对路径) ----
+.workbuddy/

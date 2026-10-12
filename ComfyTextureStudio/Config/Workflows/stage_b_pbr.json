@@ -1,0 +1,170 @@
+{
+  "35": {
+    "class_type": "SeamlessDSINENormal",
+    "inputs": {
+      "fov": 3,
+      "pad": 256,
+      "iterations": 5,
+      "flip_red": true,
+      "use_fp16": false,
+      "image": [
+        "75",
+        0
+      ]
+    }
+  },
+  "36": {
+    "class_type": "SeamlessFlattenNormal",
+    "inputs": {
+      "relief_scale": 1,
+      "flatten": true,
+      "normal": [
+        "35",
+        0
+      ]
+    }
+  },
+  "40": {
+    "class_type": "SeamlessHeightFromNormal",
+    "inputs": {
+      "low_freq_radius": 96,
+      "invert": false,
+      "headroom": 0.15,
+      "normal": [
+        "36",
+        0
+      ]
+    }
+  },
+  "41": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_height",
+      "images": [
+        "40",
+        0
+      ]
+    }
+  },
+  "50": {
+    "class_type": "SeamlessNormalFromHeight",
+    "inputs": {
+      "bump_strength": 31.4,
+      "directx": false,
+      "height": [
+        "40",
+        0
+      ]
+    }
+  },
+  "54": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_normal",
+      "images": [
+        "50",
+        0
+      ]
+    }
+  },
+  "60": {
+    "class_type": "SeamlessAOFromHeight",
+    "inputs": {
+      "radius": 24,
+      "scales": 4,
+      "strength": 1,
+      "gamma": 1,
+      "smooth": 2,
+      "height": [
+        "40",
+        0
+      ]
+    }
+  },
+  "61": {
+    "class_type": "SeamlessRoughnessFromHeight",
+    "inputs": {
+      "window": 12,
+      "min_roughness": 0.55,
+      "max_roughness": 0.95,
+      "gamma": 1,
+      "invert": false,
+      "height": [
+        "40",
+        0
+      ]
+    }
+  },
+  "62": {
+    "class_type": "PackPBRChannels",
+    "inputs": {
+      "metalness_value": 0,
+      "ao": [
+        "60",
+        0
+      ],
+      "roughness": [
+        "61",
+        0
+      ]
+    }
+  },
+  "63": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_ao",
+      "images": [
+        "60",
+        0
+      ]
+    }
+  },
+  "64": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_roughness",
+      "images": [
+        "61",
+        0
+      ]
+    }
+  },
+  "65": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_orm",
+      "images": [
+        "62",
+        0
+      ]
+    }
+  },
+  "70": {
+    "class_type": "SeamlessDelightAlbedo",
+    "inputs": {
+      "radius": 128,
+      "amount": 1,
+      "preserve_mean": true,
+      "image": [
+        "75",
+        0
+      ]
+    }
+  },
+  "71": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "textures/pbr_v2/sand_v2_albedo",
+      "images": [
+        "70",
+        0
+      ]
+    }
+  },
+  "75": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__CTS_RUNTIME_INPUT__.png"
+    }
+  }
+}
