@@ -284,6 +284,10 @@ lit render（环面 padding，严格四方连续）
 
 > **CORS 不需要**：UE 的 `FHttpModule` 是原生 HTTP 客户端，不受浏览器同源策略约束，无需给 ComfyUI 加 `--enable-cors-header`。
 > **跨机访问**：默认 Desktop 只监听 `127.0.0.1:8000`。若 ComfyUI 在另一台机器上，需要以 `--listen 0.0.0.0` 启动，并把插件 URL 指向对方 IP。
+> **⚠ `/view` 的下载参数（M1 实测踩中）**：`subfolder` 在 **Windows 上由 ComfyUI 用 `os.sep` 拼**，
+> `/history` 报回来的是**反斜杠**（`cts\20261013-110215_EB98BF`）。两种写法 `/view` 都认，但**百分号编码必须完整**：
+> 漏掉 `%` 会把 `\`(0x5C) 编成字面量 `5C`，ComfyUI 于是去找一个叫 `cts5Cxxx` 的目录并回 **404** ——
+> 而产物其实好好躺在 output 目录里，报错姿势极具误导性。实现上统一把 `\` 归一成 `/` 再编码。
 
 ### 4.2 工作流拆分方案（D1 落地）
 
@@ -813,11 +817,30 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
 
 > T4/T5 遵循既有硬标准：**keep/drop 集合一律由反向可达性程序化推导，绝不手写 id 列表**；工作流改动走 **结构 → schema → live POST /prompt** 三层验证，全绿才算通过。
 
-### M1 · 插件骨架 + 后端打通（P0 最小闭环）
+### M1 · 插件骨架 + 后端打通（P0 最小闭环） — ✅ 已完成 2026-10-13
 
-- `ComfyTextureStudio` Runtime 模块：HTTP 客户端、工作流装载、槽位注入、任务状态机
-- 命令行式触发（先不做 UI）：从代码里跑完整两阶段 + 下载 PNG
-- **验收**：一次调用产出 6 个 PNG 到 `Saved/.../Cache/<GUID>/`
+| # | 任务 | 通过标准 | 结果 |
+|---|---|---|---|
+| — | `ComfyTextureStudio` Runtime 模块：HTTP 客户端、工作流装载、槽位注入、任务状态机 | 能编译进 UE 5.8 | ✅ `UnrealEditor-ComfyTextureStudio.dll` 编译链接通过 |
+| — | 命令行式触发（不做 UI） | 从命令行跑完整两阶段 + 下载 PNG | ✅ `-run=ComfyTextureStudio`（默认 LoadingPhase 即可被找到） |
+| — | **验收**：一次调用产出 6 个 PNG 到 `Saved/.../Cache/<GUID>/` | 6/6 齐备 | ✅ **6/6**（4 交付 + 2 可选），产物 ≥ 336 KB/张，目视结构正确 |
+
+**M1 实测**：阶段 A **12.33 s**（真算）/ **1.55 s**（命中节点级缓存）· 阶段 B **4.58 s** ·
+commandlet 端到端（含 UE 启动）**18.34 s** · 增量编译 ~6–10 s。
+
+**M1 产出的可复用经验**（完整版见 [`docs/M1-report.md`](M1-report.md)）：
+
+1. **`-NoUBA` 是必需的**：不关 Unreal Build Accelerator 时，它在生成 PCH 阶段被文件系统权限拒绝，
+   报 `fatal error C1083: 无法打开预编译头文件 ... 拒绝访问` —— 像代码问题，其实是构建加速器。
+2. **commandlet 里没有 tick 循环**：`FHttpManager` 继承 `FTSTickerObjectBase`，必须手工
+   `FHttpManager::Tick()`（`FComfyHttpClient::Pump()`），否则请求永远不完成。
+3. **`FJsonObject::Values` 的键类型在 5.8 是 `UE::FSharedString`**：`Find(FString)`/`GetKeys(TArray<FString>)`
+   都编不过；单个字段改走 `HasField`/`TryGetField`。
+4. **`/view` 404 多半是转义问题**：见 §4.1 的 ⚠ 条。
+5. **缓存命中会被误读成"工具很快"**：同图同种子重提交，阶段 A 从 12.3 s 掉到 1.5 s。
+   commandlet 已提供 `-Seed=random`；**M2 的 UI 必须把"换种子/失效缓存"做成显式选项**。
+6. **ComfyUI 的真实 output 目录不在 `ComfyUI-data` 下**（本机是 `D:/Documents/comfyUI_documents/outputs`），
+   与 `custom_nodes` 是分别配置的 —— 预检里"检查 output 目录"这类动作不能靠猜路径。
 
 ### M2 · Slate 面板 + 两阶段向导（P0）
 
@@ -939,11 +962,12 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
 ```
 UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件夹）
 ├── README.md                                   ← 快速上手 + 部署到 UE 项目
-├── ComfyTextureStudio.uplugin                  ← M1 创建
+├── ComfyTextureStudio.uplugin                  ← ✅ M1 创建（Runtime 模块，默认 LoadingPhase）
 ├── docs/
 │   ├── PRD.md                                  ← 本文件
 │   ├── workflow-interface.md                   ← 工作流拆分契约 + 完整槽位表
-│   └── M0-baseline.md                          ← ✅ 实测基线（耗时/显存/IO）+ 测量方法论
+│   ├── M0-baseline.md                          ← ✅ 实测基线（耗时/显存/IO）+ 测量方法论
+│   └── M1-report.md                            ← ✅ 插件骨架 + 后端打通：实测、编译链、7 个坑
 ├── Config/
 │   └── Workflows/
 │       ├── stage_a_base_texture.json           ← ✅ 9 节点 API 图（T4 产出，valid=true）
@@ -957,7 +981,8 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
 │   ├── run_live_check.py                       ← ✅ M0 live 实跑器；**即 M1 的最小 REST 客户端参考实现**
 │   └── check_normal_convention.py              ← ✅ 几何自洽性 + 无缝 z 检验 + directx 开关语义（T6）
 ├── Saved/
-│   └── M0/<runId>/                             ← 每次实跑的产物 + report.json（可删）
+│   ├── M0/<runId>/                             ← M0 实跑产物 + report.json（可删）
+│   └── ComfyTextureStudio/Cache/<jobId>/       ← M1 起：运行的产物中转（由 CacheDir 配置决定）
 ├── Resources/
 │   ├── README.md                               ← 节点包纳管说明 + 依赖链 + 安装/同步流程（Q8）
 │   ├── Icon128.png
@@ -967,22 +992,24 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
 │       ├── pyproject.toml
 │       └── README.md
 └── Source/
-    ├── ComfyTextureStudio/                     ← Runtime 模块
+    ├── ComfyTextureStudio/                     ← ✅ Runtime 模块（M1 完成）
     │   ├── ComfyTextureStudio.Build.cs
     │   ├── Public/
-    │   │   ├── ComfyTextureStudio.h
-    │   │   ├── ComfyHttpClient.h
-    │   │   ├── ComfyWorkflowGraph.h
-    │   │   ├── ComfyTextureJob.h
-    │   │   ├── ComfyTypes.h
-    │   │   └── ComfyTextureStudioSettings.h
+    │   │   ├── ComfyTextureStudio.h                          模块入口 + 日志类别
+    │   │   ├── ComfyTypes.h                                  状态机/失败分类/中文名（纯 C++）
+    │   │   ├── ComfyHttpClient.h                             8 个 REST 端点
+    │   │   ├── ComfyWorkflowGraph.h                          装载 + 语义槽位注入
+    │   │   ├── ComfyTextureJob.h                             两阶段状态机
+    │   │   ├── ComfyTextureStudioSettings.h                  UDeveloperSettings（PRD §8）
+    │   │   └── ComfyTextureStudioCommandlet.h                无 UI 触发入口
     │   └── Private/
     │       ├── ComfyTextureStudio.cpp
     │       ├── ComfyHttpClient.cpp
     │       ├── ComfyWorkflowGraph.cpp
     │       ├── ComfyTextureJob.cpp
-    │       └── ComfyTextureStudioSettings.cpp
-    └── ComfyTextureStudioEditor/               ← Editor 模块
+    │       ├── ComfyTextureStudioSettings.cpp
+    │       └── ComfyTextureStudioCommandlet.cpp
+    └── ComfyTextureStudioEditor/               ← Editor 模块（M2 创建）
         ├── ComfyTextureStudioEditor.Build.cs
         ├── Public/
         │   ├── ComfyTextureStudioEditor.h
@@ -997,6 +1024,20 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
             ├── FComfyMaterialBuilder.cpp
             └── SComfyStagePreview.cpp
 ```
+
+**开发宿主工程（仓库根的兄弟目录）**：
+
+```
+UE_tools/ComfyTextureStudioHost/                ← ✅ M1 创建，只为编译与跑 commandlet，不含游戏内容
+├── ComfyTextureStudioHost.uproject             ← AdditionalPluginDirectories 指向 UE_tools
+├── Config/DefaultEngine.ini
+└── Source/
+    ├── ComfyTextureStudioHost.Target.cs
+    ├── ComfyTextureStudioHostEditor.Target.cs
+    └── ComfyTextureStudioHost/                 ← 空主模块，依赖 ComfyTextureStudio
+```
+
+它的 `Saved/ComfyTextureStudio/Cache/` 就是无 UI 验证时产物的落点。
 
 **部署到 UE 项目**（两种）：
 

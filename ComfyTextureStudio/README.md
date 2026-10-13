@@ -21,6 +21,7 @@
 | **[`docs/PRD.md`](docs/PRD.md)** | **主文档。** 需求、架构、接口契约、UE 侧实现设计、UI、里程碑、风险、已确认决策 |
 | [`docs/workflow-interface.md`](docs/workflow-interface.md) | 工作流拆分契约、81 个槽位全表、裁剪清单、坑位速查 |
 | [`docs/M0-baseline.md`](docs/M0-baseline.md) | **实测基线**（耗时 / 显存 / IO / 几何正确性）+ 测量方法论 |
+| [`docs/M1-report.md`](docs/M1-report.md) | **M1 报告**：插件骨架 + 后端打通；编译链、commandlet 用法、7 个实现坑 |
 | [`Config/Workflows/workflows.manifest.json`](Config/Workflows/workflows.manifest.json) | 语义槽位映射（机器可读），C++ 侧按语义键读写，**不硬编码节点 id** |
 | **[`Resources/README.md`](Resources/README.md)** | **节点包纳管说明** · 依赖链 · 安装与同步流程 |
 
@@ -124,13 +125,49 @@ curl -skL -m 900 \
 - [x] **M0-前置**：需求评审完成，8 项决策全部确认（PRD v1.1）
 - [x] **M0-前置**：节点包纳管至 `Resources/`（字节级校验通过）+ 依赖链记录
 - [x] **M0**：接口验证全绿 —— 两张 API 图导出并通过三层验证，端到端实跑成功
-- [ ] **M1**：Runtime 模块 + 任务状态机
+- [x] **M1**：Runtime 模块（HTTP 客户端 / 工作流装载 / 槽位注入 / 任务状态机）+ 无 UI 命令行触发
 - [ ] **M2**：Slate 两阶段面板 + 导入 + 材质构建（含 BumpOffset）
 - [ ] **M3**：WebSocket 进度 / 取消 / 导入报告
 - [ ] **M4**：批量候选 / 参数预设 / Nanite 位移 / Upscale 接入
 
 **M0 实测结论：端到端热 12.6 s / 冷 16.7 s**（阶段 A 7.3 s + 阶段 B 5.1 s），
 `batch_size=8` 亦不 OOM。详见 [`docs/M0-baseline.md`](docs/M0-baseline.md)。
+
+**M1 实测结论：一次 commandlet 调用产出 6/6 通道，端到端 18.34 s**
+（阶段 A 12.33 s + 阶段 B 4.58 s + UE 启动开销）。详见 [`docs/M1-report.md`](docs/M1-report.md)。
+
+---
+
+## 构建与运行（M1 起可用）
+
+需要一个宿主 UE 工程把插件编进来。仓库根下已备好最小宿主 `ComfyTextureStudioHost`：
+
+```bat
+:: 1) 编译（-NoUBA 是必需的，见注解）
+"<UE_5.8>\Engine\Build\BatchFiles\Build.bat" ComfyTextureStudioHostEditor Win64 Development ^
+  -Project="D:/PersonalDocuments/hongxuan_document/UE_tools/ComfyTextureStudioHost/ComfyTextureStudioHost.uproject" ^
+  -WaitMutex -NoUBA
+
+:: 2) 无 UI 跑完整两阶段（产出 6 张 PBR 贴图）
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" ^
+  "D:/PersonalDocuments/hongxuan_document/UE_tools/ComfyTextureStudioHost/ComfyTextureStudioHost.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout
+```
+
+```bat
+:: 常用参数
+-Seed=random          避开 ComfyUI 的节点级缓存（同图同种子重提交会直接命中，看起来"很快"其实没算）
+-Set=dsineFov=2.5,aoRadius=32     任意语义键覆盖
+-Lora=<文件名>        换 LoRA（Q7 的预留通道）
+-OutDir=<绝对路径>    覆盖产物根目录
+```
+
+产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`
+与 `report.json`；同时会把**实际提交的 API 图**存成 `stage_a_api.json` / `stage_b_api.json`，
+出问题可以直接拖进 ComfyUI 前端复现。
+
+> ⚠️ **`-NoUBA` 不能省。** 不关 Unreal Build Accelerator 时，它生成 PCH 会被文件系统权限拒绝，
+> 报 `fatal error C1083: 无法打开预编译头文件 … 拒绝访问`，看起来像代码错误，其实是构建加速器。
 
 ## 快速验证（不需要 ComfyUI 之外的东西）
 
@@ -147,4 +184,4 @@ $PY Tools/export_api_workflows.py
 $PY Tools/run_live_check.py --stage both --repeat 3
 ```
 
-需求已全部关闭，无待决策项。下一步就是 **M1**。
+需求已全部关闭，无待决策项。下一步是 **M2**：Editor 模块 + Slate 两阶段面板 + 贴图导入与材质构建。

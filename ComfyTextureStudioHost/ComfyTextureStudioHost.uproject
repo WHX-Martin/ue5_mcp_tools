@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Category": "",
+	"Description": "ComfyTextureStudio 的开发宿主工程：只为跑 M1/M2 的无 UI 验证，不含任何游戏内容。",
+	"Modules": [
+		{
+			"Name": "ComfyTextureStudioHost",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ComfyTextureStudio",
+			"Enabled": true
+		}
+	],
+	"AdditionalPluginDirectories": [
+		"D:/PersonalDocuments/hongxuan_document/UE_tools"
+	]
+}

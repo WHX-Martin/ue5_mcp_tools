@@ -56,6 +56,10 @@ DEFAULT_SOURCE = pathlib.Path(
 )
 DEFAULT_SERVER = "http://127.0.0.1:8000"
 
+# 本机服务绝不能被系统代理劫持：环境里若设了 http_proxy（如 Clash 的 127.0.0.1:7852），
+# urllib 会把发往 127.0.0.1:8000 的请求也塞给代理，拿回一个 502 Bad Gateway。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 # 会有 widget 的标量类型
 WIDGET_SCALAR_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
 # 阶段 B 图里代表"运行时输入"的占位文件名
@@ -69,7 +73,7 @@ def fetch_object_info(server: str, cache: pathlib.Path | None) -> dict:
         return json.loads(cache.read_text(encoding="utf-8"))
     url = server.rstrip("/") + "/object_info"
     print(f"[object_info] GET {url}")
-    with urllib.request.urlopen(url, timeout=120) as r:
+    with _NO_PROXY_OPENER.open(url, timeout=120) as r:
         raw = r.read().decode("utf-8")
     if cache:
         cache.write_text(raw, encoding="utf-8")

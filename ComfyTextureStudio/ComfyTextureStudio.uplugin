@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Comfy Texture Studio",
+	"Description": "从提示词经 ComfyUI 生成材质贴图与整套 PBR，并自动导入 UE 构建材质。",
+	"Category": "Rendering",
+	"CreatedBy": "Hongxuan Wang",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "ComfyTextureStudio",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

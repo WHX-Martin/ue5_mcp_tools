@@ -310,6 +310,9 @@ visible grid, tile border, depth map, normal map, displacement map, uv checker
 | 8 | widget 顺序靠猜 | 参数错位、静默出错 | 只用 `/object_info` 的 `input_order` |
 | 9 | 假设 ComfyUI 是 8188 端口 | 连不上 | 本机实测为 **8000** |
 | 10 | 把 OOM 崩溃当超时处理 | 引导用户加超时而非降配置 | 区分"连接中断"与"节点错误" |
+| 11 | **`subfolder` 里的反斜杠没被正确百分号编码** | `/view` 回 **404**，看起来像产物不存在/权限问题 | Windows 上 ComfyUI 用 `os.sep` 拼路径，`/history` 报的是 `cts\xxx`；把 `\` 归一成 `/` 再编码，且**编码器别漏 `%`**（漏了 `\`→字面量 `5C`）。M1 实测踩中 |
+| 12 | **同图同种子重复提交** | 命中 ComfyUI 节点级缓存，阶段 A 从 12.3 s 掉到 1.5 s，用户以为重算了 | 换种子（`-Seed=random`）或改任意上游参数；UI 要显式暴露该选择 |
+| 13 | commandlet 里不手工 Tick `FHttpManager` | 请求永不完成，表现为无限挂起 | `FHttpManager` 继承 `FTSTickerObjectBase`，无引擎 tick 时必须自己泵 |
 
 ---
 

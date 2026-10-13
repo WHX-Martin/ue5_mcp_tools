@@ -40,6 +40,11 @@ ROOT = HERE.parent
 CFG = ROOT / "Config" / "Workflows"
 PLACEHOLDER = "__CTS_RUNTIME_INPUT__.png"
 
+# 本机服务绝不能被系统代理劫持：环境里若设了 http_proxy（如 Clash 的 127.0.0.1:7852），
+# urllib 会把发往 127.0.0.1:8000 的请求也塞给代理，拿回一个 502 Bad Gateway，
+# 看起来像「ComfyUI 挂了」其实服务好好的。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 # --------------------------------------------------------------------------- #
 # 最小 REST 客户端
@@ -53,7 +58,7 @@ class ComfyClient:
     def _req(self, url: str, data: bytes | None = None, headers: dict | None = None,
              method: str | None = None, timeout: float = 120):
         req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _NO_PROXY_OPENER.open(req, timeout=timeout) as r:
             return r.status, r.read()
 
     def _get_json(self, path: str, timeout: float = 120):
