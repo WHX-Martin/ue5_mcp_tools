@@ -18,6 +18,7 @@
 
 class UMaterial;
 class UMaterialExpression;
+class UMaterialExpressionTextureSampleParameter2D;
 class UTexture2D;
 
 class FComfyMaterialBuilder
@@ -77,5 +78,16 @@ private:
 		UMaterialExpression* HeightSample,
 		UMaterialExpression* Multiplier,
 		const TArray<UMaterialExpression*>& DeliverableSamples,
+		FComfyMaterialBuildEntry& OutEntry);
+
+	/**
+	 * 核对每个采样节点的 SamplerType 是否与所采样贴图的压缩格式一致。
+	 *
+	 * 为什么必须在**建完之后立刻**做、而不能等材质编译报错：无头 commandlet 下
+	 * `RecompileMaterial` 拿不到 MaterialResource 就静默返回空数组，"0 错误"是假绿灯
+	 * （详见 ComfySamplerType.h）。这条错误只有前置校验抓得住。
+	 */
+	static void VerifySamplerTypes(
+		const TArray<UMaterialExpressionTextureSampleParameter2D*>& Samples,
 		FComfyMaterialBuildEntry& OutEntry);
 };

@@ -33,6 +33,7 @@ public class ComfyTextureStudioEditor : ModuleRules
 			"SlateCore",
 			"ImageWrapper",     // PNG 解码（缩略图）
 			"RenderCore",
+			"RHI",              // GMaxRHIShaderPlatform —— 判断材质编译是否真的执行了
 			"InputCore",
 			"ToolMenus",        // Window 菜单 + 关卡编辑器工具栏入口（PRD §7.1）
 			"LevelEditor",

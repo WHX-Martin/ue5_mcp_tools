@@ -23,6 +23,7 @@
 | [`docs/M0-baseline.md`](docs/M0-baseline.md) | **实测基线**（耗时 / 显存 / IO / 几何正确性）+ 测量方法论 |
 | [`docs/M1-report.md`](docs/M1-report.md) | **M1 报告**：插件骨架 + 后端打通；编译链、commandlet 用法、7 个实现坑 |
 | [`docs/M2-report.md`](docs/M2-report.md) | **M2 报告**：面板 + 导入 + 材质；三层验证结果、2 个自引入 bug（含一个崩溃）、未验证项清单 |
+| [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md) | **M2.1 补丁**：SamplerType 编译失败的三条根因（规范写错 / 自检盲区 / 编译假绿灯）、修复与负向回归测试 |
 | [`Config/Workflows/workflows.manifest.json`](Config/Workflows/workflows.manifest.json) | 语义槽位映射（机器可读），C++ 侧按语义键读写，**不硬编码节点 id** |
 | **[`Resources/README.md`](Resources/README.md)** | **节点包纳管说明** · 依赖链 · 安装与同步流程 |
 
@@ -132,6 +133,7 @@ curl -skL -m 900 \
 - [x] **M0**：接口验证全绿 —— 两张 API 图导出并通过三层验证，端到端实跑成功
 - [x] **M1**：Runtime 模块（HTTP 客户端 / 工作流装载 / 槽位注入 / 任务状态机）+ 无 UI 命令行触发
 - [x] **M2**：Editor 模块 —— Slate 三态面板、贴图导入（§6.3 属性表逐项自检）、材质图 + BumpOffset 视差 + 材质实例
+- [x] **M2.1**：修复 SamplerType 与贴图压缩格式不符（材质在编辑器里编译报红字）+ 揭穿"编译 0 错误"假绿灯
 - [ ] **M3**：WebSocket 进度 / 取消过渡态 / 参数预设 / 资产浏览器右键入口
 - [ ] **M4**：批量候选 / 任意图→PBR / Nanite 位移 / Upscale 接入
 
@@ -142,8 +144,15 @@ curl -skL -m 900 \
 （阶段 A 12.33 s + 阶段 B 4.58 s + UE 启动开销）。详见 [`docs/M1-report.md`](docs/M1-report.md)。
 
 **M2 实测结论：导入 + 建材质全链路通过，§6.3 属性表 37 项核对 0 项不符**
-（新进程从磁盘冷加载核对），视差驱动 **3/3** 张交付贴图，材质编译 0 错误。
+（新进程从磁盘冷加载核对），视差驱动 **3/3** 张交付贴图。
 详见 [`docs/M2-report.md`](docs/M2-report.md)。
+
+> ⚠️ M2 报告里那句"材质编译 0 错误"**不成立**：无头环境下编译根本没跑
+> （`RecompileMaterial` 拿不到 `MaterialResource` 就静默返回空数组），
+> 这个假绿灯同时掩盖了下面的 sampler type 错误。见 M2.1。
+
+**M2.1 实测结论：SamplerType 自检 4/4、冷加载核对 41 项 0 项不符、负向回归 8/8。**
+详见 [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md)。
 
 > ⚠️ **M2 的 UI 部分只做到"编译通过 + 逻辑接线"**：当前沙箱无法创建 GUI 窗口，
 > 无头环境下 Slate 未初始化（面板自检会优雅跳过）。面板的视觉与交互需要人工确认，
@@ -193,6 +202,11 @@ MSYS_NO_PATHCONV=1 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.
 :: HTTP 存活令牌回归测试（复现"请求飞行中销毁客户端"的时序）
 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
   -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestLiveness
+
+:: SamplerType 校验器负向回归测试（**不需要 ComfyUI，也不需要任何资产**）
+:: 断言错误组合被拒、正确组合通过 —— 防止"永远返回 true 的校验器"混过去
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestSamplerTypeCheck
 ```
 
 产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`、

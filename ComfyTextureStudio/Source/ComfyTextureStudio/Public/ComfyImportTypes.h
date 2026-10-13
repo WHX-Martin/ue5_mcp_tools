@@ -77,9 +77,31 @@ struct COMFYTEXTURESTUDIO_API FComfyMaterialBuildEntry
 	bool bCreated = false;
 	bool bCompileAttempted = false;
 	bool bCompiledClean = false;
+
+	/**
+	 * 这次编译**是否真的执行了**。
+	 *
+	 * `UMaterialEditingLibrary::RecompileMaterial` 在拿不到 MaterialResource 时静默返回
+	 * 空数组，于是无头 commandlet 下 `bCompiledClean==true` 是假绿灯（编译根本没跑）。
+	 * 只有本字段为 true 时，`bCompiledClean` / `CompileErrorCount` 才具备"编译结论"的效力。
+	 */
+	bool bCompileResultValid = false;
+
 	int32 CompileErrorCount = 0;
 	int32 CompileWarningCount = 0;
 	TArray<FString> CompileMessages;
+
+	// ---- SamplerType 自检（采样节点 ↔ 贴图压缩格式是否对齐）----
+	//
+	// 为什么单独立一组字段：这类错误是**编译期**的（引擎报
+	// `Sampler type is X, should be Y for <path>`，error 级），而无头环境的编译不可信，
+	// 所以必须由前置自检给出结论。M2 漏掉它，代价是用户打开材质看到两行红字。
+	/** 核对过的采样节点数。 */
+	int32 SamplerTypeChecked = 0;
+	/** 不符的节点数。> 0 ⇒ 材质在编辑器里必然编译失败。 */
+	int32 SamplerTypeMismatched = 0;
+	/** 不符的逐项说明（引擎原文，含贴图路径）。 */
+	TArray<FString> SamplerTypeMismatches;
 
 	/** 材质实例名，如 MI_Sand_Coarse_01。未创建时为空。 */
 	FString MaterialInstanceName;

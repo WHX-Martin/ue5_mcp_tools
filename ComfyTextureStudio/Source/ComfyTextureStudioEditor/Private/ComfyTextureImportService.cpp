@@ -4,6 +4,7 @@
 #include "AssetToolsModule.h"
 #include "AssetImportTask.h"
 #include "ComfyMaterialBuilder.h"
+#include "ComfySamplerType.h"   // SamplerType ↔ 贴图压缩格式的一致性核对
 #include "ComfyTextureStudioEditor.h"
 #include "ComfyTextureStudioSettings.h"
 #include "Engine/Texture2D.h"
@@ -592,6 +593,43 @@ bool FComfyTextureImportService::VerifyImportedAssets(
 		}
 	}
 	Check(Driven == 3, TEXT("视差驱动的采样数"), TEXT("3"), FString::Printf(TEXT("%d"), Driven));
+
+	// SamplerType ↔ 贴图压缩格式必须对齐，否则材质在编辑器里编译不过
+	// （引擎报 `Sampler type is X, should be Y for <path>`，error 级）。
+	//
+	// 这一项刻意**不依赖材质编译**：无头环境下 RecompileMaterial 拿不到 MaterialResource
+	// 就静默返回空数组，"0 错误"是假绿灯（详见 ComfySamplerType.h）。
+	// 期望值取自引擎自己的推导函数，我们只负责比对。
+	for (UMaterialExpression* Sample : Samples)
+	{
+		UMaterialExpressionTextureSampleParameter2D* TexSample =
+			Cast<UMaterialExpressionTextureSampleParameter2D>(Sample);
+		if (!TexSample)
+		{
+			continue;
+		}
+
+		FString ParamName = TexSample->ParameterName.ToString();
+		if (ParamName.IsEmpty())
+		{
+			ParamName = TEXT("(未命名采样)");
+		}
+
+		FString EngineError;
+		const bool bSamplerOk = ComfySamplerType::Verify(TexSample->Texture, TexSample->SamplerType, EngineError);
+
+		// 期望侧连贴图名一起给出来 —— 报告要能直接看出是哪张图和哪个格式对不上
+		const FString TextureName = TexSample->Texture != nullptr
+			? TexSample->Texture->GetName()
+			: FString(TEXT("无贴图"));
+		const FString ExpectText = FString::Printf(TEXT("%s（贴图 %s）"),
+			*ComfySamplerType::DisplayName(ComfySamplerType::ForTexture(TexSample->Texture)),
+			*TextureName);
+
+		const FString What = FString::Printf(TEXT("%s.SamplerType"), *ParamName);
+		Check(bSamplerOk, *What, ExpectText,
+			ComfySamplerType::DisplayName(TexSample->SamplerType));
+	}
 
 	// ------------------------------------------------------------------ 实例 //
 	Out.Lines.Add(TEXT(""));

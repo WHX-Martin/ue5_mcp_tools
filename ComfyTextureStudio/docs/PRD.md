@@ -564,17 +564,17 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
 |---|---|
 | 节点创建 | `UMaterialEditingLibrary::CreateMaterialExpression(M, Class, X, Y)` |
 | 贴图节点类型 | 用 `TextureSampleParameter2D`（**参数化**）而非 `TextureSample`，这样材质实例能换贴图 |
-| SamplerType | albedo→`SAMPLERTYPE_Color`；ORM→`SAMPLERTYPE_LinearColor`；normal→`SAMPLERTYPE_Normal`；height→`SAMPLERTYPE_Grayscale` |
+| SamplerType | **不手工指定**：由贴图的 `CompressionSettings` + `sRGB` 经引擎的 `MaterialExpressionUtils::GetSamplerTypeForTexture()` 推导。对照关系：albedo(`TC_Default`,`sRGB`)→`Color`；normal(`TC_Normalmap`)→`Normal`；orm(`TC_Masks`)→`Masks`；height(`TC_Grayscale`, sRGB off)→`LinearGrayscale`。⚠️ **原稿这里写的是「ORM→`LinearColor`、height→`Grayscale`」，两条都错**，见下方「M2 修订」第 3 条 |
 | 通道引线 | `ConnectMaterialProperty(SampleExpr, TEXT("R"/"G"/"B"), MP_AmbientOcclusion / MP_Roughness / MP_Metallic)` |
 | 主输出 | `ConnectMaterialProperty(Albedo, TEXT("RGB"), MP_BaseColor)`、`(Normal, TEXT("RGB"), MP_Normal)` |
 | 标量参数 | `RoughnessScale` / `NormalStrength` / `BumpDepth` / `Tiling`，全部建为 ScalarParameter 并连线 |
 | 材质实例 | `UMaterialInstanceConstantFactoryNew` → `MI_<Name>`；只设可调标量，不改贴图 |
-| 编译 | `UMaterialEditingLibrary::RecompileMaterial(M)`，然后检查 `M->GetCompileErrors()` 为空 |
+| 编译 | `UMaterialEditingLibrary::RecompileMaterial(M)` 后看返回值。⚠️ **返回值不可全信**：拿不到 `MaterialResource` 时它**静默返回空数组**（引擎 `MaterialEditingLibrary.cpp:1054`），无头环境下就是这种情况 —— 此时"0 错误"只代表**没编**，不代表编过。所以编译期错误（尤其 SamplerType）必须另有前置自检，见下方「M2 修订」第 3/4 条 |
 | UV 平铺 | `TextureCoordinate(UTiling=0)` → `Multiply(Tiling)` → 进 `BumpOffset.Coordinate`（再由 BumpOffset 分发到各采样） |
 | 视差 | `UMaterialExpressionBumpOffset`：`Coordinate`=Tiling 后的 UV，`Height`=height 采样，`HeightRatioInput`=`BumpDepth` 标量参数（默认建议 `0.02`，需实测手感）；其 UV 输出接三张交付贴图的 `Coordinates` |
 | Nanite 真位移 | **v1 不做**（Q4）。列为 M4 可选项，需要材质勾选 Enable Nanite Tessellation 并把高度接 World Displacement |
 
-**M2 实现记录（两处与原设计的偏离，均已实测）**：
+**M2 实现记录（四处与原设计的偏离，均已实测）**：
 
 1. **连线改成按输出索引，而不是按名字。**
    §6.2 原本建议用 `UMaterialEditingLibrary::ConnectMaterialProperty(Expr, "R", MP_...)`。
@@ -589,6 +589,22 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
    输出名可能为空（`TextureSample` 的第一个输出 `RGB` 有名字、但自定义表达式常见无名输出）。
    本插件的做法是：材质主属性按**索引**连；表达式之间的内部连线按名字连，
    且匹配时同时接受全名与去掉尾部 `Input` 的写法，失败时**把可用输入名列出来**再报错。
+
+3. **SamplerType 改由引擎推导，不再由调用方指定。**（M2.1 修复）
+   §6.2 原表把 SamplerType 写成了四张固定映射，其中 ORM→`LinearColor`、height→`Grayscale`
+   两条是**错的**：采样节点必须与贴图压缩格式对齐，否则引擎在编译材质时报
+   `Sampler type is Grayscale, should be Linear Grayscale for <path>`（error 级，材质编译不过）。
+   现在统一走 `ComfySamplerType::ForTexture()` → 引擎的
+   `MaterialExpressionUtils::GetSamplerTypeForTexture()`，**不维护第二份映射表**：
+   手写表会在引擎改规则时静默跑偏，而且我们给出的错误文案会与引擎原文分裂。
+   建完立刻回读断言（`VerifySamplerTypes`）。正确对照关系见 §6.3 下方的脚注。
+
+4. **"编译 0 错误"必须区分「编过了」和「根本没编」。**（M2.1 修复）
+   `RecompileMaterial` 的实现在拿不到 `MaterialResource` 时直接 `return {};`
+   （引擎 `MaterialEditingLibrary.cpp:1054`），于是无头 commandlet 下它永远返回空数组。
+   M2 的验收报告据此写了"编译 0 错误"，而用户在编辑器里一打开材质就看到两行红字 ——
+   **那个绿灯是假的**。现在 build entry 单独记 `bCompileResultValid` 把两者分开，
+   并把编译期错误交给前置自检（SamplerType 一致性 + 图结构回读）来拦。
 
 > 内部连线用 `FComfyMaterialBuilder::FindInputByName()`，构建与冷加载核对**共用同一份
 > 查找逻辑** —— 否则两边对不上时会分不清是"接错了"还是"找错了"。
@@ -606,6 +622,34 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
 
 > **orphan 的含义（Q3）**：`ao` / `roughness` 仍会被 ComfyUI 产出、插件也会下载（它们在 `/history` 的 outputs 里），但**默认不导入 UE、不接材质**——ORM 合并图已含这两个通道。仅在用户显式勾选"额外导入 AO/Roughness 单图"时才导入，且仍不接入材质节点。
 > manifest 里对应 `importByDefault: false` + `orphanReason`。
+
+> **SamplerType（材质侧，必须与上表对齐 —— M2.1 补录）**
+>
+> 材质里每个 `TextureSampleParameter2D` 节点的 `SamplerType` 必须与该贴图的
+> `CompressionSettings` + `sRGB` 匹配，否则引擎**编译材质**时报
+> `Sampler type is X, should be Y for <path>` —— 这是 **error 级**，材质直接编译不过，
+> 在编辑器里就是材质缩略图上的一行红字。
+>
+> 结论已经由引擎给出，**照抄它的推导即可，不要手写映射表**
+> （`MaterialExpressionUtils::GetSamplerTypeForTexture()`）：
+>
+> | 贴图 | `CompressionSettings` | `sRGB` | 正确的 `SamplerType` |
+> |---|---|---|---|
+> | albedo `T_<N>_BC` | `TC_Default` | true | `SAMPLERTYPE_Color` |
+> | normal `T_<N>_N` | `TC_Normalmap` | false | `SAMPLERTYPE_Normal` |
+> | orm `T_<N>_ORM` | `TC_Masks` | false | `SAMPLERTYPE_Masks` |
+> | height `T_<N>_H` | `TC_Grayscale` | false | `SAMPLERTYPE_LinearGrayscale` |
+> | ao / roughness（orphan） | `TC_Grayscale` | false | `SAMPLERTYPE_LinearGrayscale` |
+>
+> ⚠️ **两处最容易写错**（本表 v1 就写错了这两条，直接导致 M2 的材质在编辑器里打不开）：
+>
+> - `TC_Masks` 对应的是 **`Masks`**，不是 `LinearColor`；
+> - `TC_Grayscale` 在 sRGB **关闭**时对应 **`LinearGrayscale`**，不是 `Grayscale`
+>   —— `Grayscale` 只在 sRGB **开启**时才对。
+>
+> 校验方式：建完图立刻回读断言，且**用引擎自己的校验器**（`VerifySamplerType`），
+> 这样我们的报告与编辑器里的红字永远同源。另有一个负向回归测试
+> `-TestSamplerTypeCheck` 专门证明这个校验器在错误输入下真的会失败。
 
 三个最常出错的点，必须写进导入后自检：
 

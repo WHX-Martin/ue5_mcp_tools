@@ -96,6 +96,9 @@ Engine/Saved/
 Engine/Intermediate/
 Engine/DerivedDataCache/
 
+# 宿主工程只用于程序化验证，它 Content/ 下的资产都是导入产物（M2 起），不入库
+ComfyTextureStudioHost/Content/
+
 # ---- Logs ----
 *.log
 logs/

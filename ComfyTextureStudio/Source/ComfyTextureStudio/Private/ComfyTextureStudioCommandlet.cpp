@@ -1,9 +1,11 @@
 #include "ComfyTextureStudioCommandlet.h"
 
 #include "ComfyImportTypes.h"
+#include "ComfySamplerType.h"
 #include "ComfyTextureJob.h"
 #include "ComfyTextureStudio.h"
 #include "ComfyTextureStudioSettings.h"
+#include "Engine/Texture2D.h"
 #include "HttpManager.h"      // FHttpManager 的完整定义（HttpModule.h 只有前置声明）
 #include "HttpModule.h"
 #include "Misc/CommandLine.h"
@@ -14,6 +16,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
 
 UComfyTextureStudioCommandlet::UComfyTextureStudioCommandlet()
 {
@@ -46,6 +49,7 @@ void UComfyTextureStudioCommandlet::PrintUsage()
 	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("回归测试："));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestLiveness            复现「请求飞行中销毁客户端」的时序，验证存活令牌"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestSamplerTypeCheck    负向验证 SamplerType 校验器（不需要 ComfyUI）"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -CtsTestPanel            编辑器启动时组装一次面板并销毁（需 Slate）"));
 }
 
@@ -102,6 +106,99 @@ static int32 RunLivenessTest(const FString& ServerUrl)
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  ✓ 回调被令牌挡下，未触碰已析构对象"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	return 0;
+}
+
+/**
+ * SamplerType 校验器的负向回归测试（`-TestSamplerTypeCheck`）。
+ *
+ * 起因：M2 交付的材质在编辑器里一打开就是两行红字 ——
+ *   Sampler type is Grayscale, should be Linear Grayscale for .../T_..._H
+ *   Sampler type is Linear Color, should be Masks for .../T_..._ORM
+ * 而同一个材质的 commandlet 报告写的是「编译 0 错误」。
+ *
+ * 这个测试只证明一件事：**校验器在错误输入下真的会失败**。
+ * 一个永远返回 true 的校验器同样能让所有报告变绿 —— 那才是最难发现的故障，
+ * 所以正反两个方向都要断言：错误组合必须被拒，正确组合必须通过。
+ *
+ * 不需要 ComfyUI，也不需要任何已落盘的资产（全部就地构造成 transient 对象）。
+ */
+static int32 RunSamplerTypeCheck()
+{
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ SamplerType 校验器回归测试 ════"));
+
+	struct FCase
+	{
+		const TCHAR* Label;
+		TextureCompressionSettings Compression;
+		bool bSRGB;
+		EMaterialSamplerType Actual;
+		bool bExpectPass;
+	};
+
+	const FCase Cases[] =
+	{
+		// ---- 用户实际报的两个错误组合：必须被拒 ----
+		{ TEXT("height  TC_Grayscale + Grayscale（M2 踩的坑）"),       TC_Grayscale, false, SAMPLERTYPE_Grayscale,       false },
+		{ TEXT("orm     TC_Masks     + LinearColor（M2 踩的坑）"),     TC_Masks,     false, SAMPLERTYPE_LinearColor,     false },
+
+		// ---- 修正后的组合：必须通过 ----
+		{ TEXT("height  TC_Grayscale + LinearGrayscale（修正后）"),     TC_Grayscale, false, SAMPLERTYPE_LinearGrayscale, true  },
+		{ TEXT("orm     TC_Masks     + Masks（修正后）"),               TC_Masks,     false, SAMPLERTYPE_Masks,           true  },
+
+		// ---- 另外两张交付贴图，确认没被误伤 ----
+		{ TEXT("albedo  TC_Default   + Color"),                        TC_Default,   true,  SAMPLERTYPE_Color,           true  },
+		{ TEXT("normal  TC_Normalmap + Normal"),                       TC_Normalmap, false, SAMPLERTYPE_Normal,          true  },
+
+		// ---- 边界：TC_Grayscale 且 sRGB 打开时，Grayscale 才是对的（引擎规则） ----
+		{ TEXT("边界    TC_Grayscale + sRGB + Grayscale"),              TC_Grayscale, true,  SAMPLERTYPE_Grayscale,       true  },
+		// ---- 边界：TC_Masks 配 Normal 也必须被拒（不是"任何非 Color 都放过"） ----
+		{ TEXT("边界    TC_Masks     + Normal"),                        TC_Masks,     false, SAMPLERTYPE_Normal,          false },
+	};
+
+	int32 Failures = 0;
+	for (const FCase& C : Cases)
+	{
+		// 构造一张只带压缩设置的贴图即可 —— 采样类型的推导只看
+		// CompressionSettings / SRGB / LODGroup / 虚拟纹理开关，不需要 RHI 资源。
+		UTexture2D* Texture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
+		Texture->CompressionSettings = C.Compression;
+		Texture->SRGB = C.bSRGB ? 1 : 0;
+		Texture->LODGroup = TEXTUREGROUP_World;
+
+		FString EngineError;
+		const bool bPass = ComfySamplerType::Verify(Texture, C.Actual, EngineError);
+		const bool bCaseOk = (bPass == C.bExpectPass);
+		if (!bCaseOk)
+		{
+			++Failures;
+		}
+
+		// 三元分支必须是同类型：UE 5.8 的格式化检查不会替我们把 FString 与 const TCHAR* 统一。
+		const FString Extra = EngineError.IsEmpty()
+			? FString()
+			: FString::Printf(TEXT("   ← %s"), *EngineError);
+
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s %-48s 期望 %s，实际 %s%s"),
+			bCaseOk ? TEXT("✓") : TEXT("✗"),
+			C.Label,
+			C.bExpectPass ? TEXT("通过") : TEXT("拒绝"),
+			bPass ? TEXT("通过") : TEXT("拒绝"),
+			*Extra);
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	if (Failures > 0)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("  ✗ %d 个用例不符 —— 校验器要么漏判、要么误判"), Failures);
+		return 1;
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  校验器能区分正确与错误的采样类型（含 M2 踩的那两个组合）"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
 	return 0;
@@ -268,10 +365,25 @@ static int32 RunImportStage(const FString& CmdLine, const FComfyJobResult& Resul
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  自检汇总："));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("    导入贴图      %d 张，属性全项通过 %d 张"), ImportedCount, PropOkCount);
-	UE_LOG(LogComfyTextureStudio, Log, TEXT("    材质          %s（编译 %s，%d 错误）"),
-		R.Material.bCreated ? *R.Material.MaterialName : TEXT("未创建"),
-		R.Material.bCompiledClean ? TEXT("干净") : TEXT("有错"),
-		R.Material.CompileErrorCount);
+
+	// 编译那条腿在无头环境下是瘸的 —— 分开打印，别让人把"没编"读成"编过了"
+	if (R.Material.bCompileResultValid)
+	{
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("    材质编译      %s（%d 错误）"),
+			R.Material.bCompiledClean ? TEXT("干净") : TEXT("有错"),
+			R.Material.CompileErrorCount);
+	}
+	else
+	{
+		UE_LOG(LogComfyTextureStudio, Log,
+			TEXT("    材质编译      未执行 —— 拿不到 MaterialResource，本次“0 错误”不代表编译结论"));
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    SamplerType   %d / %d 个采样节点与贴图压缩格式对齐%s"),
+		R.Material.SamplerTypeChecked - R.Material.SamplerTypeMismatched,
+		R.Material.SamplerTypeChecked,
+		R.Material.SamplerTypeMismatched > 0 ? TEXT("  ← 材质在编辑器里会编译失败") : TEXT(""));
+
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("    视差驱动      %d / %d 张交付贴图"),
 		R.Material.SamplesDrivenByBumpOffset, R.Material.SamplesExpected);
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("    BumpOffset    Height 接线 %s · Coordinate 接线 %s"),
@@ -313,6 +425,12 @@ int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
 			Url = GetDefault<UComfyTextureStudioSettings>()->ServerUrl;
 		}
 		return RunLivenessTest(Url);
+	}
+
+	// -TestSamplerTypeCheck：SamplerType 校验器的负向回归测试（不连 ComfyUI、不需要资产）
+	if (FParse::Param(*CmdLine, TEXT("TestSamplerTypeCheck")))
+	{
+		return RunSamplerTypeCheck();
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ ComfyTextureStudio · M1 无 UI 全链路 ════"));

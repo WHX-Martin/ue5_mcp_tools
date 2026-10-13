@@ -2,6 +2,7 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
+#include "ComfySamplerType.h"   // SamplerType 的单一权威来源（引擎推导 + 引擎校验器）
 #include "ComfyTextureStudioEditor.h"
 #include "Engine/Texture2D.h"
 #include "Factories/MaterialFactoryNew.h"
@@ -16,6 +17,7 @@
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/PackageName.h"
+#include "RHI.h"                // GMaxRHIShaderPlatform
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 
@@ -150,10 +152,22 @@ namespace
 		return Param;
 	}
 
-	/** 建一个贴图采样参数节点。 */
+	/**
+	 * 建一个贴图采样参数节点。
+	 *
+	 * SamplerType **刻意不由调用方传入**：它必须与所采样贴图的压缩格式对齐，传错一个
+	 * 枚举就会做出一个"打不开的材质"（引擎报 `Sampler type is X, should be Y`，是 error
+	 * 级，材质编译直接失败）。
+	 *
+	 * 期望值统一取 ComfySamplerType::ForTexture（即引擎自己的推导）—— 调用方说了不算。
+	 * 这条曾经真的踩过：PRD §6.2 原文写 ORM→LinearColor、height→Grayscale，两条都错，
+	 * 而代码忠实实现了错规范，于是编辑器里一打开材质就是两行红字，commandlet 却报"0 错误"。
+	 *
+	 * 做法是「设值 → 立刻回读断言」（见 Build 里的 VerifySamplerTypes），
+	 * 而不是信"我刚设对了"。
+	 */
 	UMaterialExpressionTextureSampleParameter2D* MakeTextureSample(
-		UMaterial* Material, UTexture2D* Texture, EMaterialSamplerType SamplerType,
-		const TCHAR* ParamName, int32 X, int32 Y)
+		UMaterial* Material, UTexture2D* Texture, const TCHAR* ParamName, int32 X, int32 Y)
 	{
 		UMaterialExpressionTextureSampleParameter2D* Sample = Cast<UMaterialExpressionTextureSampleParameter2D>(
 			UMaterialEditingLibrary::CreateMaterialExpression(
@@ -161,7 +175,7 @@ namespace
 		if (Sample)
 		{
 			Sample->Texture = Texture;
-			Sample->SamplerType = SamplerType;
+			Sample->SamplerType = ComfySamplerType::ForTexture(Texture);
 			// 用 TextureSampleParameter2D（不是 TextureSample）就是为了让材质实例能换贴图
 			Sample->ParameterName = ParamName;
 			Sample->MaterialExpressionEditorX = X;
@@ -269,12 +283,13 @@ bool FComfyMaterialBuilder::Build(const FInputs& In, FComfyMaterialBuildEntry& O
 			Material, UMaterialExpressionMultiply::StaticClass(), -1150, -60));
 
 	// 采样节点
+	// SamplerType 不由这里指定 —— 由贴图的压缩格式推导（见 MakeTextureSample 的注释）
 	UMaterialExpressionTextureSampleParameter2D* AlbedoSample = MakeTextureSample(
-		Material, In.Albedo, SAMPLERTYPE_Color, TEXT("BaseColorTexture"), -150, -400);
+		Material, In.Albedo, TEXT("BaseColorTexture"), -150, -400);
 	UMaterialExpressionTextureSampleParameter2D* NormalSample = MakeTextureSample(
-		Material, In.Normal, SAMPLERTYPE_Normal, TEXT("NormalTexture"), -150, -20);
+		Material, In.Normal, TEXT("NormalTexture"), -150, -20);
 	UMaterialExpressionTextureSampleParameter2D* ORMSample = MakeTextureSample(
-		Material, In.ORM, SAMPLERTYPE_LinearColor, TEXT("ORMTexture"), -150, 380);
+		Material, In.ORM, TEXT("ORMTexture"), -150, 380);
 
 	UMaterialExpressionTextureSampleParameter2D* HeightSample = nullptr;
 	UMaterialExpressionBumpOffset* BumpOffset = nullptr;
@@ -283,7 +298,7 @@ bool FComfyMaterialBuilder::Build(const FInputs& In, FComfyMaterialBuildEntry& O
 	if (In.bUseHeightParallax && In.Height)
 	{
 		HeightSample = MakeTextureSample(
-			Material, In.Height, SAMPLERTYPE_Grayscale, TEXT("HeightTexture"), -900, 620);
+			Material, In.Height, TEXT("HeightTexture"), -900, 620);
 		BumpDepthParam = MakeScalarParam(Material, ParamBumpDepth(), In.BumpDepth, -1400, 760);
 		BumpOffset = Cast<UMaterialExpressionBumpOffset>(
 			UMaterialEditingLibrary::CreateMaterialExpression(
@@ -378,12 +393,49 @@ bool FComfyMaterialBuilder::Build(const FInputs& In, FComfyMaterialBuildEntry& O
 	VerifyStructure(Material, BumpOffset, HeightSample, TilingMul,
 		{ AlbedoSample, NormalSample, ORMSample }, OutEntry);
 
+	// ---- 4b. SamplerType 自检 ----
+	// 查**所有**已建出来的采样节点（不只是接了线的）：它们是我们的产物，
+	// 一旦哪天被接进图里就会成为编译错误。
+	{
+		TArray<UMaterialExpressionTextureSampleParameter2D*> AllSamples;
+		UMaterialExpressionTextureSampleParameter2D* const Candidates[] = {
+			AlbedoSample, NormalSample, ORMSample, HeightSample };
+		for (UMaterialExpressionTextureSampleParameter2D* S : Candidates)
+		{
+			if (S)
+			{
+				AllSamples.Add(S);
+			}
+		}
+		VerifySamplerTypes(AllSamples, OutEntry);
+	}
+
 	// ---- 5. 编译 ----
 	OutEntry.bCompileAttempted = true;
 	const TArray<FString> CompileErrors = UMaterialEditingLibrary::RecompileMaterial(Material);
 	OutEntry.CompileErrorCount = CompileErrors.Num();
 	OutEntry.CompileMessages = CompileErrors;
 	OutEntry.bCompiledClean = (CompileErrors.Num() == 0);
+
+	// ⚠ 必须区分「编译通过」和「编译根本没跑」。
+	//
+	// 引擎实现是：
+	//   if (const FMaterialResource* R = Material->GetMaterialResource(GMaxRHIShaderPlatform))
+	//       return R->GetCompileErrors();
+	//   return {};                      // ← 拿不到资源就返回空数组
+	// （MaterialEditingLibrary.cpp:1054）
+	//
+	// 所以无头 commandlet 下 CompileErrors.Num()==0 **不代表材质能编译过**，
+	// 只代表这次没编。M2 就是被这个假绿灯骗过去的：报告写着"编译 0 错误"，
+	// 用户打开材质却看到两行 sampler type 报错。既然编译这条腿在无头下是瘸的，
+	// 编译期错误就必须由前置自检（4b）来兜。
+	OutEntry.bCompileResultValid = (Material->GetMaterialResource(GMaxRHIShaderPlatform) != nullptr);
+	if (!OutEntry.bCompileResultValid)
+	{
+		OutEntry.StructuralWarnings.Add(TEXT(
+			"材质编译未真正执行（拿不到 MaterialResource）—— 本次的“0 错误”不是编译结论，"
+			"只表示没编。编译期错误由前置自检负责抓。"));
+	}
 
 	// 编译错误里如果出现循环依赖，多半是 height 的 UV 接错了 —— 提前说清楚
 	for (const FString& Msg : CompileErrors)
@@ -441,6 +493,16 @@ bool FComfyMaterialBuilder::Build(const FInputs& In, FComfyMaterialBuildEntry& O
 		OutError = FString::Printf(
 			TEXT("材质已建，但视差没有作用到全部交付贴图（%d/%d）。"),
 			OutEntry.SamplesDrivenByBumpOffset, OutEntry.SamplesExpected);
+		return false;
+	}
+
+	// SamplerType 不符 = 材质在编辑器里必然编译失败，属于硬错误。
+	// 这一条必须在这里拦，因为无头环境下的材质编译结果是不可信的（见上面 5 的注释）。
+	if (OutEntry.SamplerTypeMismatched > 0)
+	{
+		OutError = FString::Printf(
+			TEXT("SamplerType 自检：%d/%d 个采样节点与贴图压缩格式不符 —— 材质在编辑器里会编译失败。"),
+			OutEntry.SamplerTypeMismatched, OutEntry.SamplerTypeChecked);
 		return false;
 	}
 
@@ -516,5 +578,44 @@ void FComfyMaterialBuilder::VerifyStructure(
 		OutEntry.StructuralWarnings.Add(FString::Printf(
 			TEXT("视差只驱动了 %d 张交付贴图（应 %d 张）。只接 BaseColor 会让法线与视差错位。"),
 			Driven, OutEntry.SamplesExpected));
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// SamplerType 自检
+// --------------------------------------------------------------------------- //
+
+void FComfyMaterialBuilder::VerifySamplerTypes(
+	const TArray<UMaterialExpressionTextureSampleParameter2D*>& Samples,
+	FComfyMaterialBuildEntry& OutEntry)
+{
+	for (UMaterialExpressionTextureSampleParameter2D* Sample : Samples)
+	{
+		if (!Sample)
+		{
+			continue;
+		}
+
+		++OutEntry.SamplerTypeChecked;
+
+		FString EngineError;
+		if (ComfySamplerType::Verify(Sample->Texture, Sample->SamplerType, EngineError))
+		{
+			continue;
+		}
+
+		++OutEntry.SamplerTypeMismatched;
+
+		// 参数名单独取出来拼：UE 5.8 对 FString::Printf 有三元分支类型必须一致的检查，
+		// `cond ? TEXT("x") : *SomeFString` 这种混用会直接 C7595。
+		FString ParamName = Sample->ParameterName.ToString();
+		if (ParamName.IsEmpty())
+		{
+			ParamName = TEXT("(未命名采样)");
+		}
+
+		// 错误文本用引擎原文（与编辑器里那条红字同源），前面补参数名便于定位。
+		// 例如：Sampler type is Grayscale, should be Linear Grayscale for /Game/.../T_xxx_H
+		OutEntry.SamplerTypeMismatches.Add(FString::Printf(TEXT("[%s] %s"), *ParamName, *EngineError));
 	}
 }

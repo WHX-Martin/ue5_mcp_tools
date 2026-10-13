@@ -43,6 +43,10 @@ bool FComfyImportReport::HasProblems() const
 	{
 		return true;
 	}
+	if (Material.bCreated && Material.SamplerTypeMismatched > 0)
+	{
+		return true;
+	}
 	if (Material.bCreated && !Material.bParallaxAppliedToAllDeliverables)
 	{
 		return true;
@@ -73,11 +77,28 @@ FString FComfyImportReport::ToText() const
 
 	if (Material.bCreated)
 	{
-		Lines.Add(FString::Printf(TEXT("%s %-24s 已编译，%d 错误 %d 警告"),
-			Material.bCompiledClean ? TEXT("✓") : TEXT("✗"),
-			*Material.MaterialName,
-			Material.CompileErrorCount,
-			Material.CompileWarningCount));
+		// 编译结论只在**真的编过**时才写成"已编译"。
+		// 无头 commandlet 拿不到 MaterialResource，RecompileMaterial 会静默返回空数组，
+		// 照原样印"0 错误"就是把假绿灯写进了验收报告（M2 就是这么漏的）。
+		const FString CompileVerdict = Material.bCompileResultValid
+			? FString::Printf(TEXT("已编译，%d 错误 %d 警告"),
+				Material.CompileErrorCount, Material.CompileWarningCount)
+			: FString(TEXT("未执行编译（拿不到 MaterialResource，本行不代表编译结论）"));
+
+		const TCHAR* CompileMark = !Material.bCompileResultValid
+			? TEXT("—")
+			: (Material.bCompiledClean ? TEXT("✓") : TEXT("✗"));
+
+		Lines.Add(FString::Printf(TEXT("%s %-24s %s"),
+			CompileMark, *Material.MaterialName, *CompileVerdict));
+
+		if (Material.SamplerTypeChecked > 0)
+		{
+			Lines.Add(FString::Printf(TEXT("%s SamplerType 自检通过 %d / %d 个采样节点"),
+				Material.SamplerTypeMismatched == 0 ? TEXT("✓") : TEXT("✗"),
+				Material.SamplerTypeChecked - Material.SamplerTypeMismatched,
+				Material.SamplerTypeChecked));
+		}
 
 		Lines.Add(FString::Printf(TEXT("%s 视差已接入 %d / %d 张交付贴图"),
 			Material.bParallaxAppliedToAllDeliverables ? TEXT("✓") : TEXT("✗"),
@@ -116,6 +137,12 @@ FString FComfyImportReport::ToText() const
 		{
 			Lines.Add(FString::Printf(TEXT("⚠ %s：%s"), *E.Semantic, *M));
 		}
+	}
+
+	// SamplerType 不符：这是**引擎会在编辑器里报红字**的那种错误，逐条原样给出
+	for (const FString& M : Material.SamplerTypeMismatches)
+	{
+		Lines.Add(FString::Printf(TEXT("⚠ SamplerType %s"), *M));
 	}
 
 	return FString::Join(Lines, TEXT("\n"));
@@ -166,8 +193,11 @@ namespace
 		O->SetStringField(TEXT("materialName"), M.MaterialName);
 		O->SetStringField(TEXT("materialPackagePath"), M.MaterialPackagePath);
 		O->SetBoolField(TEXT("compiledClean"), M.bCompiledClean);
+		O->SetBoolField(TEXT("compileResultValid"), M.bCompileResultValid);
 		O->SetNumberField(TEXT("compileErrorCount"), M.CompileErrorCount);
 		O->SetNumberField(TEXT("compileWarningCount"), M.CompileWarningCount);
+		O->SetNumberField(TEXT("samplerTypeChecked"), M.SamplerTypeChecked);
+		O->SetNumberField(TEXT("samplerTypeMismatched"), M.SamplerTypeMismatched);
 		O->SetBoolField(TEXT("instanceCreated"), M.bInstanceCreated);
 		O->SetStringField(TEXT("materialInstanceName"), M.MaterialInstanceName);
 		O->SetBoolField(TEXT("bumpOffsetHeightLinked"), M.bBumpOffsetHeightLinked);
@@ -202,6 +232,15 @@ namespace
 				Arr.Add(MakeShared<FJsonValueString>(W));
 			}
 			O->SetArrayField(TEXT("structuralWarnings"), Arr);
+		}
+		if (M.SamplerTypeMismatches.Num() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> Arr;
+			for (const FString& X : M.SamplerTypeMismatches)
+			{
+				Arr.Add(MakeShared<FJsonValueString>(X));
+			}
+			O->SetArrayField(TEXT("samplerTypeMismatches"), Arr);
 		}
 		return O;
 	}
