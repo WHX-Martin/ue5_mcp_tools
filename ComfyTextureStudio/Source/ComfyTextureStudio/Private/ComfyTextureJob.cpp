@@ -74,7 +74,10 @@ void FComfyTextureJob::Tick(float DeltaSeconds)
 		return;
 	}
 
-	if (Settings != nullptr &&
+	// 超时只在**真正在跑**的时候计时。停在 PauseForReview 等用户确认不算超时 ——
+	// 否则用户切出去喝杯咖啡回来就发现任务"超时失败"了。
+	const bool bPausedForReview = (Step == EStep::PauseForReview);
+	if (!bPausedForReview && Settings != nullptr &&
 		(FPlatformTime::Seconds() - StartTime) > static_cast<double>(Settings->JobTimeoutSeconds))
 	{
 		Fail(EComfyErrorKind::Timeout,
@@ -104,6 +107,7 @@ void FComfyTextureJob::Tick(float DeltaSeconds)
 	case EStep::StageASubmit:       Step_StageASubmit(); break;
 	case EStep::StageAPoll:         Step_StageAPoll(); break;
 	case EStep::StageADownload:     Step_StageADownload(); break;
+	case EStep::PauseForReview:     Step_PauseForReview(); break;
 	case EStep::UploadInput:        Step_UploadInput(); break;
 	case EStep::StageBSubmit:       Step_StageBSubmit(); break;
 	case EStep::StageBPoll:         Step_StageBPoll(); break;
@@ -709,8 +713,40 @@ void FComfyTextureJob::Step_StageADownload()
 
 		Result.BaseTexturePath = Dest;
 		UE_LOG(LogComfyTextureStudio, Log, TEXT("阶段A 产物落盘：%s（%.0f KB）"), *Dest, Bytes.Num() / 1024.0);
-		Advance(EStep::UploadInput);
+
+		// M2：向导模式（bPauseAfterStageA）下停在这里等用户确认再往下走
+		Advance(Params.bPauseAfterStageA ? EStep::PauseForReview : EStep::UploadInput);
 	});
+}
+
+/**
+ * 停在阶段 A 之后，等用户决定「满意就继续 / 换种子重出 / 丢弃」。
+ *
+ * 这里只设状态、不做任何推进 —— Tick 因为 bWaiting=true 会一直空转。
+ * 关键点：这个状态**不算 IsFinished()**，所以超时计时被跳过（见 Tick），
+ * 用户挂在这里多久都不会被判失败。关掉面板也不会触发取消（G2 的要求）。
+ */
+void FComfyTextureJob::Step_PauseForReview()
+{
+	bWaiting = true;
+	SetState(EComfyJobState::StageAReady,
+		TEXT("基础贴图已出图。满意就继续生成 PBR，不满意可换种子重出。"));
+}
+
+bool FComfyTextureJob::ContinueToStageB()
+{
+	if (State != EComfyJobState::StageAReady)
+	{
+		return false;
+	}
+
+	// 阶段 B 有自己的完整超时窗口：重新起算，不把用户审阅花掉的时间算进去。
+	StartTime = FPlatformTime::Seconds();
+	StageBStartTime = StartTime;
+
+	Advance(EStep::UploadInput);
+	SetState(EComfyJobState::Submitting, TEXT("上传基础贴图，准备几何反演"));
+	return true;
 }
 
 // --------------------------------------------------------------------------- //

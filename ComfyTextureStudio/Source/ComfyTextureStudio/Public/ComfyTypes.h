@@ -43,6 +43,7 @@ enum class EComfyJobState : uint8
 	Submitting,  // 正在提交
 	Running,     // ComfyUI 执行中
 	Downloading, // 下载产物
+	StageAReady, // M2：阶段 A 完成并已下载，**停在这里等用户确认**（G2：用户可以对结果不满意而关掉面板）
 	Ready,       // 阶段 B 产物齐备（M1 的终点，M2 从这里接导入）
 	Importing,   // M2：导入 UE + 建材质
 	Done,
@@ -59,6 +60,7 @@ inline const TCHAR* LexToString(EComfyJobState State)
 	case EComfyJobState::Submitting:  return TEXT("Submitting");
 	case EComfyJobState::Running:     return TEXT("Running");
 	case EComfyJobState::Downloading: return TEXT("Downloading");
+	case EComfyJobState::StageAReady: return TEXT("StageAReady");
 	case EComfyJobState::Ready:       return TEXT("Ready");
 	case EComfyJobState::Importing:   return TEXT("Importing");
 	case EComfyJobState::Done:        return TEXT("Done");

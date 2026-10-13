@@ -57,8 +57,15 @@ struct FComfyHistoryResult
 class COMFYTEXTURESTUDIO_API FComfyHttpClient
 {
 public:
-	FComfyHttpClient() = default;
+	FComfyHttpClient();
 	FComfyHttpClient(const FString& InBaseUrl, float InRequestTimeoutSeconds = 60.0f, bool bInVerbose = false);
+	~FComfyHttpClient();
+
+	// 请求是异步的，飞行中可能有回调等着打回来。一旦本对象被移动/拷贝，
+	// 旧对象的令牌就得作废 —— 所以显式处理这两个特殊成员。
+	FComfyHttpClient(FComfyHttpClient&& Other);
+	FComfyHttpClient(const FComfyHttpClient&) = delete;
+	FComfyHttpClient& operator=(const FComfyHttpClient&) = delete;
 
 	void Configure(const FString& InBaseUrl, float InRequestTimeoutSeconds, bool bInVerbose);
 
@@ -97,6 +104,28 @@ public:
 	const FString& GetBaseUrl() const { return BaseUrl; }
 
 private:
+	/**
+	 * 存活令牌。
+	 *
+	 * 为什么必须有：`FHttpModule` 的请求是异步的，完成回调由引擎在稍后触发。
+	 * 如果本对象在请求飞行期间就被销毁（典型场景：用户点了「重新探测」马上关掉面板，
+	 * 或任务被丢弃），裸捕获的 `this` 就变成野指针 —— 表现是
+	 * `EXCEPTION_ACCESS_VIOLATION reading address 0xffffffffffffffff` 这种"读空指针"崩溃，
+	 * 而且发生在 HTTP 回调里，堆栈完全指不到业务代码。
+	 *
+	 * 每个回调都拿一份这个令牌，开头先确认它还在且未被作废。
+	 * 令牌用 TSharedPtr 持有，所以即使客户端对象已经没了，令牌本身还活着 ——
+	 * 回调因此能安全地读到 `bAlive == false` 并安静返回。
+	 */
+	struct FLiveness
+	{
+		bool bAlive = true;
+	};
+	TSharedPtr<FLiveness> Liveness;
+
+	/** 飞行中的请求（析构时统一取消，免得关掉面板后还在后台等超时）。 */
+	TArray<FHttpRequestPtr> PendingRequests;
+
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> NewRequest(const FString& Verb, const FString& Path);
 	void LogVerbose(const FString& What, const FString& Body) const;
 

@@ -172,10 +172,85 @@ bool FComfyWorkflowGraph::LoadManifest(const FString& ManifestPath,
 			}
 		}
 
+		// ---- outputAssets：PRD §6.3 属性表的单一来源 ----
+		const TArray<TSharedPtr<FJsonValue>>* AssetArray = nullptr;
+		if ((*StageObj)->TryGetArrayField(TEXT("outputAssets"), AssetArray) && AssetArray != nullptr)
+		{
+			for (const TSharedPtr<FJsonValue>& AssetValue : *AssetArray)
+			{
+				const TSharedPtr<FJsonObject> AssetObj = AssetValue.IsValid() ? AssetValue->AsObject() : nullptr;
+				if (!AssetObj.IsValid())
+				{
+					continue;
+				}
+
+				FComfyOutputAssetSpec Asset;
+				AssetObj->TryGetStringField(TEXT("semantic"), Asset.Semantic);
+				if (Asset.Semantic.IsEmpty())
+				{
+					continue; // 没有语义键就没法索引，直接跳过而不是塞个空条目
+				}
+				Asset.NodeId = JsonValueToString(AssetObj->TryGetField(TEXT("nodeId")));
+				AssetObj->TryGetStringField(TEXT("comfyType"), Asset.ComfyType);
+				AssetObj->TryGetBoolField(TEXT("isDeliverable"), Asset.bIsDeliverable);
+
+				const TSharedPtr<FJsonObject>* UE = nullptr;
+				if (AssetObj->TryGetObjectField(TEXT("ue"), UE) && UE != nullptr)
+				{
+					(*UE)->TryGetStringField(TEXT("suffix"), Asset.Suffix);
+					(*UE)->TryGetStringField(TEXT("role"), Asset.Role);
+					(*UE)->TryGetStringField(TEXT("compressionSettings"), Asset.CompressionSettings);
+					(*UE)->TryGetBoolField(TEXT("srgb"), Asset.bSRGB);
+					(*UE)->TryGetBoolField(TEXT("flipGreenChannel"), Asset.bFlipGreenChannel);
+					(*UE)->TryGetStringField(TEXT("lodGroup"), Asset.LODGroup);
+					(*UE)->TryGetStringField(TEXT("addressMode"), Asset.AddressMode);
+					(*UE)->TryGetStringField(TEXT("usage"), Asset.Usage);
+					(*UE)->TryGetStringField(TEXT("warning"), Asset.Warning);
+					(*UE)->TryGetStringField(TEXT("orphanReason"), Asset.OrphanReason);
+					// importByDefault 决定 Q3 的默认行为；缺失时退回 isDeliverable
+					if (!(*UE)->TryGetBoolField(TEXT("importByDefault"), Asset.bImportByDefault))
+					{
+						Asset.bImportByDefault = Asset.bIsDeliverable;
+					}
+				}
+				else
+				{
+					Asset.bImportByDefault = Asset.bIsDeliverable;
+				}
+
+				Spec.OutputAssets.Add(Asset.Semantic, MoveTemp(Asset));
+			}
+		}
+
 		OutStages.Add(StageKey, MoveTemp(Spec));
 	}
 
 	return true;
+}
+
+TArray<FString> FComfyStageSpec::GetImportableSemantics() const
+{
+	TArray<FString> Keys;
+	OutputAssets.GetKeys(Keys);
+
+	// 按 ComfyChannels::All() 的固定顺序排（交付物在前），未知键按字典序垫后。
+	// 固定顺序的意义：报告与 UI 的行序每次都一样，便于逐张比对。
+	const TArray<FString>& Canonical = ComfyChannels::All();
+	Keys.Sort([&Canonical](const FString& A, const FString& B)
+	{
+		const int32 IndexA = Canonical.IndexOfByKey(A);
+		const int32 IndexB = Canonical.IndexOfByKey(B);
+		if (IndexA != INDEX_NONE && IndexB != INDEX_NONE)
+		{
+			return IndexA < IndexB;
+		}
+		if (IndexA != IndexB)
+		{
+			return IndexA != INDEX_NONE; // 认识的排前面
+		}
+		return A < B;
+	});
+	return Keys;
 }
 
 // --------------------------------------------------------------------------- //

@@ -22,6 +22,7 @@
 | [`docs/workflow-interface.md`](docs/workflow-interface.md) | 工作流拆分契约、81 个槽位全表、裁剪清单、坑位速查 |
 | [`docs/M0-baseline.md`](docs/M0-baseline.md) | **实测基线**（耗时 / 显存 / IO / 几何正确性）+ 测量方法论 |
 | [`docs/M1-report.md`](docs/M1-report.md) | **M1 报告**：插件骨架 + 后端打通；编译链、commandlet 用法、7 个实现坑 |
+| [`docs/M2-report.md`](docs/M2-report.md) | **M2 报告**：面板 + 导入 + 材质；三层验证结果、2 个自引入 bug（含一个崩溃）、未验证项清单 |
 | [`Config/Workflows/workflows.manifest.json`](Config/Workflows/workflows.manifest.json) | 语义槽位映射（机器可读），C++ 侧按语义键读写，**不硬编码节点 id** |
 | **[`Resources/README.md`](Resources/README.md)** | **节点包纳管说明** · 依赖链 · 安装与同步流程 |
 
@@ -108,7 +109,7 @@ curl -skL -m 900 \
 | Q7 | 预留换 LoRA 通道 | **预留**，LoRA 枚举从 `/object_info` 实时拉取 |
 | Q8 | 节点包位置 | **放 `Resources/`** + README 记录 |
 
-## 部署（M1 之后）
+## 部署（M2 之后）
 
 ```ini
 ; 方式一：拷贝到插件目录
@@ -118,6 +119,10 @@ curl -skL -m 900 \
 "AdditionalPluginDirectories": [ "D:/PersonalDocuments/hongxuan_document/UE_tools" ]
 ```
 
+启用后：**Window → Comfy Texture Studio**（关卡编辑器工具栏也有入口）。
+面板是可自由停靠/浮出的 Nomad Tab；打开时会自动探测 ComfyUI 连接并从
+`/object_info` 拉取 LoRA / 采样器 / 调度枚举。
+
 ## 当前状态
 
 - [x] **M0-前置**：工作流结构实测解析（43 节点 / 46 link / 81 槽位）
@@ -126,15 +131,23 @@ curl -skL -m 900 \
 - [x] **M0-前置**：节点包纳管至 `Resources/`（字节级校验通过）+ 依赖链记录
 - [x] **M0**：接口验证全绿 —— 两张 API 图导出并通过三层验证，端到端实跑成功
 - [x] **M1**：Runtime 模块（HTTP 客户端 / 工作流装载 / 槽位注入 / 任务状态机）+ 无 UI 命令行触发
-- [ ] **M2**：Slate 两阶段面板 + 导入 + 材质构建（含 BumpOffset）
-- [ ] **M3**：WebSocket 进度 / 取消 / 导入报告
-- [ ] **M4**：批量候选 / 参数预设 / Nanite 位移 / Upscale 接入
+- [x] **M2**：Editor 模块 —— Slate 三态面板、贴图导入（§6.3 属性表逐项自检）、材质图 + BumpOffset 视差 + 材质实例
+- [ ] **M3**：WebSocket 进度 / 取消过渡态 / 参数预设 / 资产浏览器右键入口
+- [ ] **M4**：批量候选 / 任意图→PBR / Nanite 位移 / Upscale 接入
 
 **M0 实测结论：端到端热 12.6 s / 冷 16.7 s**（阶段 A 7.3 s + 阶段 B 5.1 s），
 `batch_size=8` 亦不 OOM。详见 [`docs/M0-baseline.md`](docs/M0-baseline.md)。
 
 **M1 实测结论：一次 commandlet 调用产出 6/6 通道，端到端 18.34 s**
 （阶段 A 12.33 s + 阶段 B 4.58 s + UE 启动开销）。详见 [`docs/M1-report.md`](docs/M1-report.md)。
+
+**M2 实测结论：导入 + 建材质全链路通过，§6.3 属性表 37 项核对 0 项不符**
+（新进程从磁盘冷加载核对），视差驱动 **3/3** 张交付贴图，材质编译 0 错误。
+详见 [`docs/M2-report.md`](docs/M2-report.md)。
+
+> ⚠️ **M2 的 UI 部分只做到"编译通过 + 逻辑接线"**：当前沙箱无法创建 GUI 窗口，
+> 无头环境下 Slate 未初始化（面板自检会优雅跳过）。面板的视觉与交互需要人工确认，
+> 清单见 M2-report §6。另外**法线单光源渲染验证仍未做**。
 
 ---
 
@@ -162,9 +175,30 @@ curl -skL -m 900 \
 -OutDir=<绝对路径>    覆盖产物根目录
 ```
 
-产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`
-与 `report.json`；同时会把**实际提交的 API 图**存成 `stage_a_api.json` / `stage_b_api.json`，
-出问题可以直接拖进 ComfyUI 前端复现。
+### M2 起：导入 UE 并建材质
+
+```bat
+:: 跑完两阶段后直接导入 UE + 建材质（无 UI）
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout ^
+  -Import -Seed=random -BaseName=cts_m2_verify2
+:: 可选：-DestPath=/Game/... -NoFlipGreen -NoBumpOffset -ImportOrphans -NoMaterialInstance -BumpDepth=0.02
+
+:: 冷加载核对（**不需要 ComfyUI**）：新进程从磁盘重新加载资产，逐项核 §6.3 与材质图结构
+:: ⚠ /Game 路径前必须关掉 Git Bash 的 MSYS 路径转换，否则参数会被改写成 Windows 本地路径
+MSYS_NO_PATHCONV=1 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout ^
+  -VerifyOnly=/Game/ComfyTextures/cts_m2_verify2
+
+:: HTTP 存活令牌回归测试（复现"请求飞行中销毁客户端"的时序）
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestLiveness
+```
+
+产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`、
+`report.json` 与 `report_import.json`；同时会把**实际提交的 API 图**存成
+`stage_a_api.json` / `stage_b_api.json`，出问题可以直接拖进 ComfyUI 前端复现。
+导入的资产落在宿主工程的 `Content/ComfyTextures/<基名>/`。
 
 > ⚠️ **`-NoUBA` 不能省。** 不关 Unreal Build Accelerator 时，它生成 PCH 会被文件系统权限拒绝，
 > 报 `fatal error C1083: 无法打开预编译头文件 … 拒绝访问`，看起来像代码错误，其实是构建加速器。
@@ -184,4 +218,5 @@ $PY Tools/export_api_workflows.py
 $PY Tools/run_live_check.py --stage both --repeat 3
 ```
 
-需求已全部关闭，无待决策项。下一步是 **M2**：Editor 模块 + Slate 两阶段面板 + 贴图导入与材质构建。
+需求已全部关闭，无待决策项。**下一步是 M3**：WebSocket 实时进度、取消过渡态、参数预设、
+资产浏览器右键入口，以及人工确认 M2 的 UI（清单见 M2-report §6）。

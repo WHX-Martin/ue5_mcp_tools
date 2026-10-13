@@ -31,6 +31,45 @@ struct FComfySlotBinding
 	FString ResolvedAddress;
 };
 
+/**
+ * manifest 里一个产出通道的 UE 侧导入规格（`outputAssets[].ue`）。
+ *
+ * **这是 PRD §6.3 属性表的单一来源** —— 压缩格式、sRGB、绿通道、寻址、LOD 组
+ * 全部从 manifest 读，不在 C++ 里再抄一遍。manifest 改了，导入行为跟着改。
+ */
+struct FComfyOutputAssetSpec
+{
+	/** 语义键：albedo / normal / height / orm / ao / roughness。 */
+	FString Semantic;
+	FString NodeId;
+	FString ComfyType;
+
+	/** 是否属于"交付物"（Q3：ORM 合并 ⇒ ao/roughness 不是）。 */
+	bool bIsDeliverable = false;
+
+	bool bImportByDefault = false;
+	FString OrphanReason;
+
+	/** 资产名后缀，如 `_BC`。 */
+	FString Suffix;
+
+	/** 接进材质的角色描述，纯展示用，如 `BaseColor` 或 `R=AmbientOcclusion, G=Roughness, B=Metallic`。 */
+	FString Role;
+
+	// ---- 引擎枚举的字符串名，Editor 侧负责映射到实际枚举 ----
+	FString CompressionSettings; // TC_Default / TC_Normalmap / TC_Masks / TC_Grayscale
+	bool bSRGB = false;
+	bool bFlipGreenChannel = false;
+	FString LODGroup;            // TEXTUREGROUP_World / TEXTUREGROUP_WorldNormalMap
+	FString AddressMode;         // TA_WRAP
+
+	/** 高度图的特殊用法标记：`bumpOffsetParallax`。 */
+	FString Usage;
+
+	/** manifest 里记的注意事项，出错提示直接用。 */
+	FString Warning;
+};
+
 /** manifest 里一个阶段的规格。 */
 struct FComfyStageSpec
 {
@@ -47,6 +86,12 @@ struct FComfyStageSpec
 
 	/** 语义键 → 产出该通道的 SaveImage 节点 id。 */
 	TMap<FString, FString> OutputNodeIds;
+
+	/** 语义键 → UE 导入规格（属性表的单一来源）。 */
+	TMap<FString, FComfyOutputAssetSpec> OutputAssets;
+
+	/** 能导入 UE 的通道，语义键升序稳定排列。 */
+	TArray<FString> GetImportableSemantics() const;
 };
 
 class COMFYTEXTURESTUDIO_API FComfyWorkflowGraph

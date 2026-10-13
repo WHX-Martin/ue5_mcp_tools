@@ -125,9 +125,48 @@ FString FComfyImageRef::ToQueryString() const
 // 骨架
 // --------------------------------------------------------------------------- //
 
+FComfyHttpClient::FComfyHttpClient()
+{
+	Liveness = MakeShared<FLiveness>();
+}
+
 FComfyHttpClient::FComfyHttpClient(const FString& InBaseUrl, float InRequestTimeoutSeconds, bool bInVerbose)
 {
+	Liveness = MakeShared<FLiveness>();
 	Configure(InBaseUrl, InRequestTimeoutSeconds, bInVerbose);
+}
+
+FComfyHttpClient::FComfyHttpClient(FComfyHttpClient&& Other)
+{
+	Liveness = MoveTemp(Other.Liveness);
+	PendingRequests = MoveTemp(Other.PendingRequests);
+	BaseUrl = MoveTemp(Other.BaseUrl);
+	RequestTimeoutSeconds = Other.RequestTimeoutSeconds;
+	bVerbose = Other.bVerbose;
+
+	// 被移走的那个对象即将销毁，它的令牌必须作废 —— 否则它析构时会把
+	// 新对象正在用的令牌标记为"已死"，新对象的回调全部被静默丢弃。
+	Other.Liveness = MakeShared<FLiveness>();
+	Other.PendingRequests.Reset();
+}
+
+FComfyHttpClient::~FComfyHttpClient()
+{
+	// 1) 先作废令牌：飞行中的回调即便被触发也会立刻安静返回
+	if (Liveness.IsValid())
+	{
+		Liveness->bAlive = false;
+	}
+
+	// 2) 再取消请求：免得对象没了请求还在后台等超时
+	for (const FHttpRequestPtr& Request : PendingRequests)
+	{
+		if (Request.IsValid())
+		{
+			Request->CancelRequest();
+		}
+	}
+	PendingRequests.Reset();
 }
 
 void FComfyHttpClient::Configure(const FString& InBaseUrl, float InRequestTimeoutSeconds, bool bInVerbose)
@@ -147,6 +186,7 @@ TSharedRef<IHttpRequest, ESPMode::ThreadSafe> FComfyHttpClient::NewRequest(const
 	Request->SetURL(BaseUrl + Path);
 	Request->SetVerb(Verb);
 	Request->SetTimeout(FMath::Max(1.0f, RequestTimeoutSeconds));
+	PendingRequests.Add(Request);
 	return Request;
 }
 
@@ -180,8 +220,14 @@ void FComfyHttpClient::GetSystemStats(
 {
 	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = NewRequest(TEXT("GET"), TEXT("/system_stats"));
 	Request->OnProcessRequestComplete().BindLambda(
-		[this, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[this, Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 客户端可能在请求飞行中被销毁（面板关闭 / 任务丢弃）——
+			// 回调必须自己确认宿主还在，否则 this 是野指针（表现为访问 0xffff... 崩溃）
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			FComfySystemStats Stats;
 			FString Error;
 			bool bTransportFailure = false;
@@ -250,8 +296,14 @@ void FComfyHttpClient::GetObjectInfo(
 {
 	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = NewRequest(TEXT("GET"), TEXT("/object_info"));
 	Request->OnProcessRequestComplete().BindLambda(
-		[this, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[this, Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 客户端可能在请求飞行中被销毁（面板关闭 / 任务丢弃）——
+			// 回调必须自己确认宿主还在，否则 this 是野指针（表现为访问 0xffff... 崩溃）
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			if (!bConnected || !Response.IsValid())
 			{
 				OnDone(false, nullptr, FString::Printf(TEXT("无法连接 %s/object_info"), *BaseUrl));
@@ -293,8 +345,14 @@ void FComfyHttpClient::SubmitPrompt(const FString& PromptGraphJson, const FStrin
 	Request->SetContentAsString(Body);
 
 	Request->OnProcessRequestComplete().BindLambda(
-		[this, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[this, Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 客户端可能在请求飞行中被销毁（面板关闭 / 任务丢弃）——
+			// 回调必须自己确认宿主还在，否则 this 是野指针（表现为访问 0xffff... 崩溃）
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			FComfySubmitResult Result;
 			if (!bConnected || !Response.IsValid())
 			{
@@ -348,8 +406,14 @@ void FComfyHttpClient::GetHistory(const FString& PromptId, TFunction<void(const 
 		NewRequest(TEXT("GET"), FString::Printf(TEXT("/history/%s"), *PromptId));
 
 	Request->OnProcessRequestComplete().BindLambda(
-		[this, OnDone, PromptId](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[this, Liveness = Liveness, OnDone, PromptId](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 客户端可能在请求飞行中被销毁（面板关闭 / 任务丢弃）——
+			// 回调必须自己确认宿主还在，否则 this 是野指针（表现为访问 0xffff... 崩溃）
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			FComfyHistoryResult Result;
 			if (!bConnected || !Response.IsValid())
 			{
@@ -454,8 +518,15 @@ void FComfyHttpClient::DownloadImage(const FComfyImageRef& Image,
 		NewRequest(TEXT("GET"), FString::Printf(TEXT("/view?%s"), *Image.ToQueryString()));
 
 	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 这个 lambda 自己没捕获 this，但它调用的 OnDone 由**调用方**捕获。
+			// 调用方（面板 / 任务）销毁时客户端会一并销毁并把令牌作废 —— 这里必须拦一下，
+			// 否则就是替调用方访问已析构对象。
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			if (!bConnected || !Response.IsValid())
 			{
 				OnDone(false, TArray<uint8>(), TEXT("下载连接失败"));
@@ -508,8 +579,14 @@ void FComfyHttpClient::UploadImage(const TArray<uint8>& PngBytes, const FString&
 	Request->SetContent(MoveTemp(Body));
 
 	Request->OnProcessRequestComplete().BindLambda(
-		[this, OnDone, RemoteName](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[this, Liveness = Liveness, OnDone, RemoteName](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 客户端可能在请求飞行中被销毁（面板关闭 / 任务丢弃）——
+			// 回调必须自己确认宿主还在，否则 this 是野指针（表现为访问 0xffff... 崩溃）
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			if (!bConnected || !Response.IsValid())
 			{
 				OnDone(false, FString(), TEXT("上传连接失败"));
@@ -559,8 +636,15 @@ void FComfyHttpClient::Interrupt(TFunction<void(bool)> OnDone)
 	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 	Request->SetContentAsString(TEXT("{}"));
 	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 这个 lambda 自己没捕获 this，但它调用的 OnDone 由**调用方**捕获。
+			// 调用方（面板 / 任务）销毁时客户端会一并销毁并把令牌作废 —— 这里必须拦一下，
+			// 否则就是替调用方访问已析构对象。
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			OnDone(bConnected && Response.IsValid() && Response->GetResponseCode() == 200);
 		});
 	Request->ProcessRequest();
@@ -572,8 +656,15 @@ void FComfyHttpClient::DeleteQueueItem(const FString& PromptId, TFunction<void(b
 	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 	Request->SetContentAsString(FString::Printf(TEXT("{\"delete\":[\"%s\"]}"), *PromptId));
 	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 这个 lambda 自己没捕获 this，但它调用的 OnDone 由**调用方**捕获。
+			// 调用方（面板 / 任务）销毁时客户端会一并销毁并把令牌作废 —— 这里必须拦一下，
+			// 否则就是替调用方访问已析构对象。
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			OnDone(bConnected && Response.IsValid() && Response->GetResponseCode() == 200);
 		});
 	Request->ProcessRequest();
@@ -584,8 +675,15 @@ void FComfyHttpClient::GetQueue(
 {
 	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = NewRequest(TEXT("GET"), TEXT("/queue"));
 	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[Liveness = Liveness, OnDone](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
 		{
+			// 这个 lambda 自己没捕获 this，但它调用的 OnDone 由**调用方**捕获。
+			// 调用方（面板 / 任务）销毁时客户端会一并销毁并把令牌作废 —— 这里必须拦一下，
+			// 否则就是替调用方访问已析构对象。
+			if (!Liveness.IsValid() || !Liveness->bAlive)
+			{
+				return;
+			}
 			if (!bConnected || !Response.IsValid())
 			{
 				OnDone(false, nullptr, TEXT("GET /queue 连接失败"));

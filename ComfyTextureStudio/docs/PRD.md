@@ -2,14 +2,14 @@
 
 | 项 | 值 |
 |---|---|
-| 文档版本 | **v1.2**（M0 接口验证已完成） |
-| 日期 | 2026-10-12 |
+| 文档版本 | **v1.3**（M0 / M1 / M2 均已完成） |
+| 日期 | 2026-10-13 |
 | 插件名 | `ComfyTextureStudio`（短名 `CTS`，模块 `ComfyTextureStudio` + `ComfyTextureStudioEditor`）· **Q1 已定案** |
-| 目标引擎 | **UE 5.8.3**（主）/ UE 5.6.1（兼容） |
+| 目标引擎 | **UE 5.8.3**（主）/ UE 5.6.1（兼容）· ⚠ 目前只在 5.8.3 上编译验证过 |
 | 目标宿主 | ComfyUI Desktop **v0.38.2** @ `http://127.0.0.1:8000` |
 | 依赖工作流 | `sdxl_sand_pbr_v2_geom.json`（43 节点，实测已跑通） |
 | 依赖节点包 | `comfyui_seamless_texture` **v1.3.0**（Q8：已纳管至 `Resources/`） |
-| 状态 | **已评审 · 8 项决策确认 · M0 接口验证全绿** |
+| 状态 | **8 项决策确认 · M0/M1 全绿 · M2 后端链路已验证（UI 待人工确认）** |
 
 ---
 
@@ -210,10 +210,19 @@ lit render（环面 padding，严格四方连续）
 
 | 模块 | 类型 | 职责 | 关键依赖（Build.cs） |
 |---|---|---|---|
-| `ComfyTextureStudio` | Runtime | ComfyUI HTTP 客户端、工作流 JSON 装载与槽位注入、任务状态机、数据结构、设置 | `Core`, `CoreUObject`, `Engine`, `HTTP`, `Json`, `JsonUtilities`, `DeveloperSettings` |
-| `ComfyTextureStudioEditor` | Editor | Slate 面板与两阶段向导、贴图导入、材质图构建、资产浏览器交互 | 上面全部 + `UnrealEd`, `Slate`, `SlateCore`, `ToolMenus`, `MaterialEditor`, `AssetTools`, `ImageWrapper`, `RenderCore`, `EditorScriptingUtilities`, `WebSockets`(P1) |
+| `ComfyTextureStudio` | Runtime | ComfyUI HTTP 客户端、工作流 JSON 装载与槽位注入、任务状态机、数据结构、设置、**导入接口层** | `Core`, `CoreUObject`, `Engine`, `HTTP`, `Json`, `JsonUtilities`, `DeveloperSettings`, `Projects` |
+| `ComfyTextureStudioEditor` | Editor | Slate 面板与两阶段向导、命名解析、贴图导入、材质图构建 | 上面全部 + `UnrealEd`, `Slate`, `SlateCore`, `ToolMenus`, `LevelEditor`, `MaterialEditor`, `AssetTools`, `AssetRegistry`, `ContentBrowser`, `ImageWrapper`, `RenderCore`, `EditorStyle`, `ApplicationCore`, `Projects`, `Json`, `JsonUtilities` |
 
 > 为什么要拆两个模块：Runtime 模块可被其他工具（如未来的批处理命令行）复用；Editor 模块能带上 `UnrealEd`/`MaterialEditor` 这类只在编辑器存在的重依赖，不污染运行时。
+>
+> **M2 实现补充（模块解耦）**：导入与建材质必须用 `UnrealEd`/`MaterialEditor`，但 commandlet
+> 在 Runtime 模块里、又要能调用它们做程序化验收。做法是在 Runtime 侧只定义
+> **纯数据结构 + 抽象接口 + 注册表**（`ComfyImportTypes.h` 的 `IComfyAssetImportProvider`
+> 与 `FComfyImportRegistry`），Editor 模块在 `StartupModule` 注册实现。
+> 两边都只依赖这一层，**没有模块循环依赖**，Runtime 也仍然是"干净"的。
+>
+> 注：`EditorScriptingUtilities` / `WebSockets` 实际未使用（前者用 `ContentBrowser` 的
+> 引擎命令替代「在资产浏览器中显示」，后者是 M3 的事），故未列入。
 
 ### 3.2 组件图
 
@@ -565,7 +574,24 @@ M_Sand_Coarse_01  (Default Lit / Opaque / TwoSided=false)
 | 视差 | `UMaterialExpressionBumpOffset`：`Coordinate`=Tiling 后的 UV，`Height`=height 采样，`HeightRatioInput`=`BumpDepth` 标量参数（默认建议 `0.02`，需实测手感）；其 UV 输出接三张交付贴图的 `Coordinates` |
 | Nanite 真位移 | **v1 不做**（Q4）。列为 M4 可选项，需要材质勾选 Enable Nanite Tessellation 并把高度接 World Displacement |
 
-> ⚠️ `UMaterialEditingLibrary` 的连线 API 对**输出/输入名称大小写敏感**（`"R"` 不是 `"r"`）。若连不上，回退到直接操作 `Material->GetEditorOnlyData()->ExpressionCollection` 并手工填 `FExpressionInput`——PRD 把它列为实现期需以引擎源码核实的点。
+**M2 实现记录（两处与原设计的偏离，均已实测）**：
+
+1. **连线改成按输出索引，而不是按名字。**
+   §6.2 原本建议用 `UMaterialEditingLibrary::ConnectMaterialProperty(Expr, "R", MP_...)`。
+   读引擎源码发现它内部会经 `UMaterialGraphNode::GetShortenPinName` 处理名字再比较 ——
+   等于把编辑器 UI 的 pin 命名规则当成了 API 契约。改成按索引连
+   （`TextureSample` 的输出顺序在其构造函数里硬编码：`0=RGB 1=R 2=G 3=B 4=A 5=RGBA`），
+   并在连完后**回读** `Input->Expression` / `OutputIndex` 断言。
+
+2. **补充更正：原稿说"输出/输入名称大小写敏感"是不够准确的。**
+   实际比较用的是 `FName`（默认大小写不敏感，`FName("R") == FName("r")` 为真）。
+   真正需要小心的是 **pin 名可能被缩短**（`HeightRatioInput` ↔ `HeightRatio`）以及
+   输出名可能为空（`TextureSample` 的第一个输出 `RGB` 有名字、但自定义表达式常见无名输出）。
+   本插件的做法是：材质主属性按**索引**连；表达式之间的内部连线按名字连，
+   且匹配时同时接受全名与去掉尾部 `Input` 的写法，失败时**把可用输入名列出来**再报错。
+
+> 内部连线用 `FComfyMaterialBuilder::FindInputByName()`，构建与冷加载核对**共用同一份
+> 查找逻辑** —— 否则两边对不上时会分不清是"接错了"还是"找错了"。
 
 ### 6.3 导入属性表（**逐项照做，这是 G3 的验收依据**）
 
@@ -842,10 +868,26 @@ commandlet 端到端（含 UE 启动）**18.34 s** · 增量编译 ~6–10 s。
 6. **ComfyUI 的真实 output 目录不在 `ComfyUI-data` 下**（本机是 `D:/Documents/comfyUI_documents/outputs`），
    与 `custom_nodes` 是分别配置的 —— 预检里"检查 output 目录"这类动作不能靠猜路径。
 
-### M2 · Slate 面板 + 两阶段向导（P0）
+### M2 · Slate 面板 + 两阶段向导（P0） — ✅ 已完成 2026-10-13
 
 - 完整 UI（§7.2）、状态门控、缩略图、2×2 自检、错误映射
 - **验收**：不打开 ComfyUI 前端，面板内完成 提示词→审阅→PBR→导入→材质；§6.3 属性表逐项核对通过；法线单光源验证通过
+
+**M2 实际达成情况**（详见 [`M2-report.md`](M2-report.md)）：
+
+| 验收项 | 结果 |
+|---|---|
+| 导入 + 建材质全链路（Editor 模块） | ✅ 一次调用产出 6 张 PNG → 导入 4 张 → 建材质 + 实例 |
+| §6.3 属性表逐项核对 | ✅ **37 项 / 0 项不符**（`-VerifyOnly` 新进程从磁盘冷加载核对） |
+| 视差作用到全部三张交付贴图（Q4） | ✅ **3 / 3**（只接 BaseColor 的经典错误已被程序化排除） |
+| 材质编译 | ✅ 0 错误 0 警告 |
+| orphan（Q3）未导入未接材质 | ✅ |
+| UI 的视觉与交互 | ⚠️ **已编译，但未做运行期验证**（沙箱无法创建 GUI 窗口；无头下 Slate 未初始化，自检优雅跳过）。人工确认清单见 M2-report §6 |
+| 法线单光源验证（§6.4） | ⚠️ **未做**。M0 的 `directx` 开关对照已证明产物为 OpenGL 约定、`FlipGreenChannel=true` 成立；渲染侧最终确认待人工 |
+
+过程中自己引入并修掉两个 bug，都记在 M2-report §4：绿通道翻转被全局应用
+（**属性表自检抓出来的**）、HTTP 回调在对象销毁后访问野指针（导致编辑器崩溃，
+已用存活令牌根治并加了 `-TestLiveness` 回归测试）。
 
 ### M3 · 体验完善（P1）
 
@@ -858,17 +900,19 @@ commandlet 端到端（含 UE 启动）**18.34 s** · 增量编译 ~6–10 s。
 
 ### 全局验收清单
 
-- [ ] 单提示词 → 4 张交付贴图 → 可渲染材质，全程零手工文件操作
-- [ ] 阶段 A 跑完后**不**触发阶段 B 即可关闭面板（G2）
-- [ ] 全部导入贴图的压缩 / `sRGB` / 绿通道 / 寻址 **全部**符合 §6.3
-- [ ] `ao` / `roughness` **未**被导入、未接材质（Q3）
-- [ ] 高度图**确实**通过 `BumpOffset` 影响了三张交付贴图的 UV（不是只接了 BaseColor）（Q4）
-- [ ] 命名模板模式与手填模式都能产出正确资产名；手填冲突时**报错而非覆盖**（Q6）
-- [ ] 换一个非沙地 LoRA 能直接在下拉里选到并生效（Q7）
-- [ ] 预检的"一键复制节点包"写到了 `ComfyUI-data/custom_nodes/`，复制后节点真的可用（Q8）
-- [ ] 材质编译 0 错误 0 警告，平铺 4×4 无可见接缝
-- [ ] 错误分类能区分"节点报错"与"进程崩溃"（§9.1）
-- [ ] 已在 5.6 与 5.8 上各编译一次
+标注含义：✅ 已程序化验证 · ◐ 已实现但只做过部分验证 · ⬜ 未做
+
+- ✅ 单提示词 → 4 张交付贴图 → 可渲染材质，全程零手工文件操作（commandlet `-Import` 实测；**UI 路径未验**）
+- ◐ 阶段 A 跑完后**不**触发阶段 B 即可关闭面板（G2）—— `bPauseAfterStageA` 已实现，且暂停期间不计超时；"关面板不触发取消"待人工确认
+- ✅ 全部导入贴图的压缩 / `sRGB` / 绿通道 / 寻址 **全部**符合 §6.3（37 项 / 0 项不符，冷加载核对）
+- ✅ `ao` / `roughness` **未**被导入、未接材质（Q3）
+- ✅ 高度图**确实**通过 `BumpOffset` 影响了三张交付贴图的 UV（不是只接了 BaseColor）（Q4）—— 视差驱动 3/3
+- ◐ 命名模板模式与手填模式都能产出正确资产名；手填冲突时**报错而非覆盖**（Q6）—— 逻辑已实现（`IndexConflictPolicy=Error`），但命令行只走了默认命名，双通道待人工验
+- ◐ 换一个非沙地 LoRA 能直接在下拉里选到并生效（Q7）—— LoRA 枚举从 `/object_info` 实时拉取，待人工验
+- ⬜ 预检的"一键复制节点包"写到了 `ComfyUI-data/custom_nodes/`，复制后节点真的可用（Q8）—— 预检已能识别缺失，**"一键复制"按钮尚未实现**
+- ◐ 材质编译 0 错误 0 警告，平铺 4×4 无可见接缝 —— 前者 ✅，后者待人工
+- ✅ 错误分类能区分"节点报错"与"进程崩溃"（§9.1）—— 13 类失败分类，`ServerCrashed` 与 `Timeout` 分开
+- ⬜ 已在 5.6 与 5.8 上各编译一次 —— 目前只在 5.8.3 上编译过
 
 ---
 
@@ -967,7 +1011,8 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
 │   ├── PRD.md                                  ← 本文件
 │   ├── workflow-interface.md                   ← 工作流拆分契约 + 完整槽位表
 │   ├── M0-baseline.md                          ← ✅ 实测基线（耗时/显存/IO）+ 测量方法论
-│   └── M1-report.md                            ← ✅ 插件骨架 + 后端打通：实测、编译链、7 个坑
+│   ├── M1-report.md                            ← ✅ 插件骨架 + 后端打通：实测、编译链、7 个坑
+│   └── M2-report.md                            ← ✅ 面板 + 导入 + 材质：三层验证结果、2 个自引入 bug、未验证项清单
 ├── Config/
 │   └── Workflows/
 │       ├── stage_a_base_texture.json           ← ✅ 9 节点 API 图（T4 产出，valid=true）
@@ -992,14 +1037,15 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
 │       ├── pyproject.toml
 │       └── README.md
 └── Source/
-    ├── ComfyTextureStudio/                     ← ✅ Runtime 模块（M1 完成）
+    ├── ComfyTextureStudio/                     ← ✅ Runtime 模块（M1 完成，M2 微调）
     │   ├── ComfyTextureStudio.Build.cs
     │   ├── Public/
     │   │   ├── ComfyTextureStudio.h                          模块入口 + 日志类别
     │   │   ├── ComfyTypes.h                                  状态机/失败分类/中文名（纯 C++）
-    │   │   ├── ComfyHttpClient.h                             8 个 REST 端点
-    │   │   ├── ComfyWorkflowGraph.h                          装载 + 语义槽位注入
-    │   │   ├── ComfyTextureJob.h                             两阶段状态机
+    │   │   ├── ComfyHttpClient.h                             9 个 REST 端点 + 存活令牌
+    │   │   ├── ComfyWorkflowGraph.h                          装载 + 语义槽位注入 + 产物规格
+    │   │   ├── ComfyTextureJob.h                             两阶段状态机（M2 加 StageAReady 暂停点）
+    │   │   ├── ComfyImportTypes.h                            ★ 导入接口层（请求/报告/提供者注册表）
     │   │   ├── ComfyTextureStudioSettings.h                  UDeveloperSettings（PRD §8）
     │   │   └── ComfyTextureStudioCommandlet.h                无 UI 触发入口
     │   └── Private/
@@ -1007,23 +1053,31 @@ UE_tools/ComfyTextureStudio/                    ← 插件仓库根（本文件�
     │       ├── ComfyHttpClient.cpp
     │       ├── ComfyWorkflowGraph.cpp
     │       ├── ComfyTextureJob.cpp
+    │       ├── ComfyImportTypes.cpp                          报告序列化 + 注册表
     │       ├── ComfyTextureStudioSettings.cpp
-    │       └── ComfyTextureStudioCommandlet.cpp
-    └── ComfyTextureStudioEditor/               ← Editor 模块（M2 创建）
+    │       └── ComfyTextureStudioCommandlet.cpp              -Import / -VerifyOnly / -TestLiveness
+    └── ComfyTextureStudioEditor/               ← ✅ Editor 模块（M2 完成）
         ├── ComfyTextureStudioEditor.Build.cs
         ├── Public/
-        │   ├── ComfyTextureStudioEditor.h
-        │   ├── SComfyTextureStudioPanel.h
-        │   ├── FComfyTextureImportService.h
-        │   ├── FComfyMaterialBuilder.h
-        │   └── SComfyStagePreview.h
+        │   ├── ComfyTextureStudioEditor.h                    模块入口 + 面板构造自检
+        │   ├── ComfyAssetNaming.h                            命名双通道（Q6）
+        │   ├── ComfyTextureImportService.h                   导入 + §6.3 属性表 + 自检 + 冷加载核对
+        │   ├── ComfyMaterialBuilder.h                        材质图 + BumpOffset 视差 + 结构自检
+        │   └── SComfyTextureStudioPanel.h                    三态面板（§7.2）
         └── Private/
-            ├── ComfyTextureStudioEditor.cpp
-            ├── SComfyTextureStudioPanel.cpp
-            ├── FComfyTextureImportService.cpp
-            ├── FComfyMaterialBuilder.cpp
-            └── SComfyStagePreview.cpp
+            ├── ComfyTextureStudioEditor.cpp                  服务注册 / Tab / 菜单 / 工具栏
+            ├── ComfyAssetNaming.cpp
+            ├── ComfyTextureImportService.cpp
+            ├── ComfyMaterialBuilder.cpp
+            └── SComfyTextureStudioPanel.cpp                  2×2 平铺自检内联实现（未单独拆 widget）
 ```
+
+> **M2 相对原规划的两处调整**：
+> 1. 新增 `ComfyImportTypes.h/.cpp`（Runtime 侧接口层）—— 让 Runtime 保持"不依赖 UnrealEd"
+>    的同时，commandlet 仍能调用 Editor 模块的导入与材质实现，避免模块循环依赖。
+> 2. **没有**单独拆 `SComfyStagePreview`：2×2 平铺自检在面板里用
+>    `SUniformGridPanel` + 4 个 `SImage` 内联实现（同一张图重复 4 次即为平铺），
+>    拆成独立 widget 反而多一层不必要的转发。
 
 **开发宿主工程（仓库根的兄弟目录）**：
 

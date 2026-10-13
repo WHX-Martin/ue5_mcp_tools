@@ -37,6 +37,14 @@ struct FComfyTextureJobParams
 
 	/** 产物根目录的绝对路径。空则用插件设置里的 CacheDir。 */
 	FString OutputRootAbs;
+
+	/**
+	 * M2 新增：阶段 A 下载完成后**停下来**，进入 StageAReady 等用户确认。
+	 *
+	 * 这是 PRD §7.2 的两阶段向导所必需的（G2：用户对基础贴图不满意时可以只跑阶段 A
+	 * 然后关掉面板，不该被迫跑完阶段 B）。确认后调 ContinueToStageB() 接着走。
+	 */
+	bool bPauseAfterStageA = false;
 };
 
 /** 一次任务的结果。 */
@@ -81,7 +89,16 @@ public:
 	/** 取消：走 /interrupt + /queue 删除两条路径（PRD §9.3）。 */
 	void Cancel();
 
+	/**
+	 * 处于 StageAReady 时调它继续跑阶段 B。
+	 * 复用已上传的输入（不再重传），并把超时窗口重新计时。
+	 * 状态不对时返回 false。
+	 */
+	bool ContinueToStageB();
+
 	bool IsFinished() const;
+	/** 是否停在阶段 A 等用户确认（此时不该再 Tick 推进，但任务没结束）。 */
+	bool IsAwaitingStageAReview() const { return State == EComfyJobState::StageAReady; }
 	EComfyJobState GetState() const { return State; }
 	const FString& GetProgressText() const { return ProgressText; }
 	const FComfyJobResult& GetResult() const { return Result; }
@@ -105,6 +122,7 @@ private:
 		StageASubmit,
 		StageAPoll,
 		StageADownload,
+		PauseForReview,   // M2：停在这里等用户看阶段 A 的结果
 		UploadInput,
 		StageBSubmit,
 		StageBPoll,
@@ -124,6 +142,7 @@ private:
 	void Step_StageASubmit();
 	void Step_StageAPoll();
 	void Step_StageADownload();
+	void Step_PauseForReview();
 	void Step_UploadInput();
 	void Step_StageBSubmit();
 	void Step_StageBPoll();

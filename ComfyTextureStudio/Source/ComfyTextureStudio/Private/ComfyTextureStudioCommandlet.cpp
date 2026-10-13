@@ -1,12 +1,16 @@
 #include "ComfyTextureStudioCommandlet.h"
 
+#include "ComfyImportTypes.h"
 #include "ComfyTextureJob.h"
 #include "ComfyTextureStudio.h"
 #include "ComfyTextureStudioSettings.h"
+#include "HttpManager.h"      // FHttpManager 的完整定义（HttpModule.h 只有前置声明）
+#include "HttpModule.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/Class.h"
@@ -26,6 +30,257 @@ void UComfyTextureStudioCommandlet::PrintUsage()
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -run=ComfyTextureStudio -unattended -nopause -nosplash"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -JobId= -Prompt= -Negative= -Seed= -Steps= -Width= -Height= -BatchSize="));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -Lora= -Set=key=value,... -ServerUrl= -OutDir="));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("M2 导入链路（跑完两阶段后直接导入 UE 并建材质，无 UI）："));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -Import                  开启导入"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -BaseName=Sand_Coarse_01 资产基名（默认 cts_m2_<jobId后6位>）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -DestPath=/Game/...      资产落点（默认 <AssetRootPath>/<BaseName>）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -NoFlipGreen             不翻法线绿通道（默认翻，D3）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -NoBumpOffset            高度图不接 BumpOffset 视差"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -ImportOrphans           额外导入 AO/Roughness（默认不导，Q3）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -NoMaterialInstance      不创建材质实例"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -BumpDepth=0.02          BumpOffset 的高度比例"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("M2 冷加载核对（不连 ComfyUI，验证已落盘资产的属性与材质图结构）："));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -VerifyOnly=/Game/ComfyTextures/<基名>"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("回归测试："));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestLiveness            复现「请求飞行中销毁客户端」的时序，验证存活令牌"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -CtsTestPanel            编辑器启动时组装一次面板并销毁（需 Slate）"));
+}
+
+/**
+ * HTTP 客户端存活令牌的回归测试（`-TestLiveness`）。
+ *
+ * 背景：编辑器里曾因为「面板发起 /object_info 后立刻被销毁」而崩溃 ——
+ * 飞行中的完成回调访问了已析构的面板，报
+ * `EXCEPTION_ACCESS_VIOLATION reading address 0xffffffffffffffff`，
+ * 而且堆栈落在引擎的 HTTP 代码里，完全指不到业务代码。
+ *
+ * 这个测试复现那个时序：发一个请求 → **立刻销毁客户端** → 泵一段时间让回调有机会触发。
+ * 回调用一个栈上的标志位当探针（作用域仍在，所以即使被误调用也不会崩，
+ * 而是把标志改成 true 让我们看得出来）。
+ *
+ * 通过标准：标志位保持 false —— 也就是回调被令牌挡住了。
+ */
+static int32 RunLivenessTest(const FString& ServerUrl)
+{
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ 存活令牌回归测试 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  服务  %s"), *ServerUrl);
+
+	bool bCallbackReached = false;
+
+	{
+		TUniquePtr<FComfyHttpClient> Client = MakeUnique<FComfyHttpClient>(ServerUrl, 10.0f);
+
+		Client->GetObjectInfo([&bCallbackReached](
+			bool, const TSharedPtr<FJsonObject>&, const FString&)
+		{
+			// 这个标志就在栈上，作用域还没结束 —— 所以即使被误调用也不会立刻崩，
+			// 但能让我们看出"回调穿过了令牌"。
+			bCallbackReached = true;
+		});
+
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  已发起 /object_info 并**立刻销毁客户端**"));
+		// 出作用域：客户端析构 → 令牌作废 + 取消飞行中的请求
+	}
+
+	// 泵一段时间，给被取消/已完成的请求充分的回调机会。
+	// commandlet 里没有引擎 tick，必须手工驱动。
+	for (int32 i = 0; i < 100; ++i)
+	{
+		FHttpModule::Get().GetHttpManager().Tick(0.016f);
+		FPlatformProcess::Sleep(0.02f);
+	}
+
+	if (bCallbackReached)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("  ✗ 回调穿过了存活令牌 —— 客户端销毁后仍有回调被执行，这就是野指针的来源"));
+		return 1;
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  ✓ 回调被令牌挡下，未触碰已析构对象"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	return 0;
+}
+
+/**
+ * M2 冷加载核对：**不碰 ComfyUI**，只从磁盘重新加载已导入的资产，逐项核 §6.3
+ * 与材质图结构。
+ *
+ * 单独跑一个进程的意义：导入时的自检读的是同一进程里刚写过的内存对象，
+ * 属于"自己检查自己"。这里没有任何内存缓存 —— 一切从磁盘读回。只有这一层通过，
+ * 才能说"属性真的被保存下来了"（§6.3 是 G3 的验收依据）。
+ */
+static int32 RunVerifyOnly(const FString& DestinationPath)
+{
+	FModuleManager::Get().LoadModule(TEXT("ComfyTextureStudioEditor"));
+
+	IComfyAssetImportProvider* Provider = FComfyImportRegistry::Get().GetProvider();
+	if (Provider == nullptr)
+	{
+		UE_LOG(LogComfyTextureStudio, Error, TEXT("导入服务未注册（Editor 模块没加载）。"));
+		return 1;
+	}
+
+	// 基名就是包路径的最后一段
+	const FString BaseName = FPaths::GetCleanFilename(DestinationPath);
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ M2 · 冷加载核对 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  落点  %s"), *DestinationPath);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  基名  %s"), *BaseName);
+
+	FComfyAssetVerification Verification;
+	const bool bOk = Provider->VerifyImportedAssets(DestinationPath, BaseName, Verification);
+
+	TArray<FString> Lines;
+	Verification.ToText().ParseIntoArrayLines(Lines);
+	for (const FString& Line : Lines)
+	{
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s"), *Line);
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  核对结果  %d 项，%d 项不符 → %s"),
+		Verification.Checked, Verification.Failed, bOk ? TEXT("通过") : TEXT("不通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+
+	return bOk ? 0 : 1;
+}
+
+/**
+ * M2：跑完两阶段后，直接走「导入贴图 + 建材质」全链路。
+ *
+ * 为什么放在 commandlet 里：UI 无法在无头环境点击，但导入与建材质的**逻辑**
+ * 必须真的跑过一次才算验收 —— PRD §6.3 的属性表要逐项回读核对，材质图的
+ * BumpOffset 接线要回读确认。这些都只能程序化验证。
+ *
+ * Editor 模块（提供 IComfyAssetImportProvider）在这里显式加载：它是
+ * LoadingPhase=PostEngineInit 的 Editor 模块，正常会被加载，但命令行走的是
+ * 特殊路径，显式一次更稳。
+ */
+static int32 RunImportStage(const FString& CmdLine, const FComfyJobResult& Result)
+{
+	if (!Result.bSuccess)
+	{
+		UE_LOG(LogComfyTextureStudio, Error, TEXT("两阶段未成功，跳过导入。"));
+		return 1;
+	}
+
+	FModuleManager::Get().LoadModule(TEXT("ComfyTextureStudioEditor"));
+
+	IComfyAssetImportProvider* Provider = FComfyImportRegistry::Get().GetProvider();
+	if (Provider == nullptr)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("导入服务未注册 —— ComfyTextureStudioEditor 模块没加载成功。"));
+		return 1;
+	}
+
+	const UComfyTextureStudioSettings* Settings = GetDefault<UComfyTextureStudioSettings>();
+
+	FComfyImportRequest Request;
+
+	FParse::Value(*CmdLine, TEXT("BaseName="), Request.BaseName);
+	if (Request.BaseName.IsEmpty())
+	{
+		Request.BaseName = FString::Printf(TEXT("cts_m2_%s"),
+			*Result.JobId.Right(6).ToLower());
+	}
+
+	FString DestOverride;
+	FParse::Value(*CmdLine, TEXT("DestPath="), DestOverride);
+	Request.DestinationPath = DestOverride.IsEmpty()
+		? FString::Printf(TEXT("%s/%s"), *Settings->AssetRootPath, *Request.BaseName)
+		: DestOverride;
+
+	// 命令行模式下材质名走默认前缀（面板那侧的模板/手填解析在 Editor 模块里）
+	Request.MaterialName = FString::Printf(TEXT("M_%s"), *Request.BaseName);
+	Request.MaterialInstanceName = FString::Printf(TEXT("MI_%s"), *Request.BaseName);
+
+	Request.bFlipGreenChannel = !FParse::Param(*CmdLine, TEXT("NoFlipGreen"));
+	Request.bImportHeight = !FParse::Param(*CmdLine, TEXT("NoBumpOffset"));
+	Request.bImportOrphanMaps = FParse::Param(*CmdLine, TEXT("ImportOrphans"));
+	Request.bCreateMaterialInstance = !FParse::Param(*CmdLine, TEXT("NoMaterialInstance"));
+	Request.bDeleteSourcePng = !Settings->PreserveDownloadedPng;
+
+	float BumpDepth = Settings->DefaultBumpDepth;
+	if (FParse::Value(*CmdLine, TEXT("BumpDepth="), BumpDepth))
+	{
+		// 覆盖成命令行的值
+	}
+	Request.BumpDepth = BumpDepth;
+
+	Request.ChannelPngPaths = Result.ChannelPaths;
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ M2 · 导入与建材质 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  基名        %s"), *Request.BaseName);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  落点        %s"), *Request.DestinationPath);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  翻绿通道    %s   视差 %s   orphan 导入 %s"),
+		Request.bFlipGreenChannel ? TEXT("是") : TEXT("否"),
+		Request.bImportHeight ? TEXT("是") : TEXT("否"),
+		Request.bImportOrphanMaps ? TEXT("是") : TEXT("否"));
+
+	const FComfyImportResult ImportResult = Provider->ImportAndBuildMaterial(Request);
+
+	// 报告原文逐行打到日志：这是 G3 验收时要肉眼核对的东西
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	{
+		TArray<FString> Lines;
+		ImportResult.Report.ToText().ParseIntoArrayLines(Lines);
+		for (const FString& Line : Lines)
+		{
+			UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s"), *Line);
+		}
+	}
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+
+	if (!ImportResult.bSuccess && !ImportResult.ErrorText.IsEmpty())
+	{
+		UE_LOG(LogComfyTextureStudio, Error, TEXT("导入失败：%s"), *ImportResult.ErrorText);
+	}
+
+	// 落一份机器可读的报告，供后续脚本比对
+	const FString ReportPath = FPaths::Combine(Result.OutputDir, TEXT("report_import.json"));
+	FFileHelper::SaveStringToFile(ImportResult.Report.ToJson(), *ReportPath);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  导入报告    %s"), *ReportPath);
+
+	// 结构化自检结论（供 CI / 人工一眼判断）
+	const FComfyImportReport& R = ImportResult.Report;
+	int32 ImportedCount = 0;
+	int32 PropOkCount = 0;
+	for (const FComfyTextureImportEntry& E : R.Textures)
+	{
+		if (E.bImported)
+		{
+			++ImportedCount;
+			if (E.bPropertyCheckPassed)
+			{
+				++PropOkCount;
+			}
+		}
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  自检汇总："));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    导入贴图      %d 张，属性全项通过 %d 张"), ImportedCount, PropOkCount);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    材质          %s（编译 %s，%d 错误）"),
+		R.Material.bCreated ? *R.Material.MaterialName : TEXT("未创建"),
+		R.Material.bCompiledClean ? TEXT("干净") : TEXT("有错"),
+		R.Material.CompileErrorCount);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    视差驱动      %d / %d 张交付贴图"),
+		R.Material.SamplesDrivenByBumpOffset, R.Material.SamplesExpected);
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    BumpOffset    Height 接线 %s · Coordinate 接线 %s"),
+		R.Material.bBumpOffsetHeightLinked ? TEXT("是") : TEXT("否"),
+		R.Material.bBumpOffsetCoordinateLinked ? TEXT("是") : TEXT("否"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("    材质实例      %s"),
+		R.Material.bInstanceCreated ? *R.Material.MaterialInstanceName : TEXT("未创建"));
+
+	return ImportResult.bSuccess ? 0 : 1;
 }
 
 int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
@@ -38,6 +293,26 @@ int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
 	{
 		PrintUsage();
 		return 0;
+	}
+
+	// -VerifyOnly=<DestPath>：只做冷加载核对，不连 ComfyUI（M2 验收用）
+	{
+		FString VerifyOnlyPath;
+		if (FParse::Value(*CmdLine, TEXT("VerifyOnly="), VerifyOnlyPath) && !VerifyOnlyPath.IsEmpty())
+		{
+			return RunVerifyOnly(VerifyOnlyPath);
+		}
+	}
+
+	// -TestLiveness：HTTP 存活令牌回归测试（复现"请求飞行中销毁客户端"的时序）
+	if (FParse::Param(*CmdLine, TEXT("TestLiveness")))
+	{
+		FString Url;
+		if (!FParse::Value(*CmdLine, TEXT("ServerUrl="), Url) || Url.IsEmpty())
+		{
+			Url = GetDefault<UComfyTextureStudioSettings>()->ServerUrl;
+		}
+		return RunLivenessTest(Url);
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ ComfyTextureStudio · M1 无 UI 全链路 ════"));
@@ -199,6 +474,12 @@ int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
 		UE_LOG(LogComfyTextureStudio, Log,
 			TEXT("结果        成功 · %d/%d 通道就绪（其中交付通道 %d/%d）"),
 			Found, ComfyChannels::All().Num(), DeliverableFound, ComfyChannels::Deliverable().Num());
+
+		// M2：-Import 时接着把贴图导进 UE 并建材质（这段需要 Editor 模块）
+		if (FParse::Param(*CmdLine, TEXT("Import")))
+		{
+			return RunImportStage(CmdLine, Result);
+		}
 		return 0;
 	}
 
