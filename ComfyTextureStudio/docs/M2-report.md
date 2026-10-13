@@ -175,6 +175,14 @@ Content/ComfyTextures/cts_m2_verify2/
   MI_cts_m2_verify2.uasset          4,439 B
 ```
 
+> **注意：中转 PNG 在导入后被清掉了**（`stage_b/` 目录为空）。
+> 这是配置行为 —— `UComfyTextureStudioSettings::PreserveDownloadedPng` 默认为 `false`
+> （PRD §8），`-Import` 流程按它清理了 `Cache/<JobId>/stage_b/`。
+> 所以 `report_import.json` 里每条的 `sourcePng` 是**来源记录**，那些文件此刻可能已不在。
+> 想留着 PNG（复用或事后核对）就在设置里把 `PreserveDownloadedPng` 打开，
+> 或跑 `-Import` 时不要用会触发清理的路径。
+> `.uasset` 本身不受影响 —— 属性已经烘进资产了（这正是 §3.2 冷加载核对能通过的原因）。
+
 ---
 
 ## 4. 自己引入并修掉的两个 bug
