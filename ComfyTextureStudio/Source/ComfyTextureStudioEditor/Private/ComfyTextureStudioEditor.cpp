@@ -15,6 +15,7 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "SComfyImageViewer.h"
 #include "SComfyTextureStudioPanel.h"
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -82,6 +83,20 @@ void FComfyTextureStudioEditorModule::SmokeTestPanel()
 	// 立刻销毁：析构路径同样要能安全走完（ticker 注销、transient 贴图出根集合）
 	Panel.Reset();
 	UE_LOG(LogComfyTextureStudioEditor, Log, TEXT("  ✓ 析构成功（ticker 已注销、贴图已出根）"));
+
+	// 图片查看器的构造/析构自检（空态：不给贴图，覆盖"没有图时也不崩"）。
+	// ⚠ 覆盖不到实际绘制与鼠标手势 —— 缩放/平移的手感只能在有人操作的编辑器里确认。
+	{
+		TSharedPtr<SComfyImageViewer> Viewer = SNew(SComfyImageViewer)
+			.Preview(nullptr)
+			.Title(FText::FromString(TEXT("查看器自检")))
+			.StartTiled(true);
+		UE_LOG(LogComfyTextureStudioEditor, Log, TEXT("  ✓ SComfyImageViewer 构造成功（空态）"));
+
+		Viewer.Reset();
+		UE_LOG(LogComfyTextureStudioEditor, Log, TEXT("  ✓ 查看器析构成功"));
+	}
+
 	UE_LOG(LogComfyTextureStudioEditor, Log, TEXT("  面板自检通过"));
 }
 

@@ -2,17 +2,20 @@
 
 #include "Brushes/SlateDynamicImageBrush.h"
 #include "ComfyAssetNaming.h"
+#include "ComfyPreviewTexture.h"
 #include "ComfyTextureImportService.h"
 #include "ComfyTextureStudioEditor.h"
 #include "ComfyTextureStudioSettings.h"
 #include "ComfyWorkflowGraph.h"
 #include "Dom/JsonObject.h"
 #include "Editor.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "ImageUtils.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "SComfyImageViewer.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -31,6 +34,7 @@
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Widgets/Notifications/SProgressBar.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "ComfyTextureStudioPanel"
@@ -746,7 +750,21 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(const FString& P
 			]
 		];
 	}
-	return Grid;
+
+	// 点开时直接以平铺模式打开：150px 下接缝太难判，大窗里 2×2 才看得清
+	return SNew(SButton)
+		.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+		.ContentPadding(0.0f)
+		.ToolTipText(LOCTEXT("OpenTiledTip",
+			"点击放大查看（直接以 2×2 平铺打开，便于判断四方连续是否有接缝）"))
+		.OnClicked_Lambda([this, PngPath]()
+		{
+			OpenImageViewer(PngPath, TEXT("基础贴图 · 平铺"), /*bStartTiled=*/true);
+			return FReply::Handled();
+		})
+		[
+			Grid
+		];
 }
 
 TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
@@ -766,10 +784,22 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(SBox).WidthOverride(150.0f).HeightOverride(150.0f)
+					SNew(SButton)
+					.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+					.ContentPadding(0.0f)
+					.ToolTipText(LOCTEXT("OpenOriginalTip",
+						"点击放大查看：滚轮缩放 · 拖拽平移 · 双击复位"))
+					.OnClicked_Lambda([this]()
+					{
+						OpenImageViewer(FocusedPreviewPath, TEXT("基础贴图"));
+						return FReply::Handled();
+					})
 					[
-						SNew(SImage)
-						.Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
+						SNew(SBox).WidthOverride(150.0f).HeightOverride(150.0f)
+						[
+							SNew(SImage)
+							.Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
+						]
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 0)
@@ -817,9 +847,20 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 						SNew(SVerticalBox)
 						+ SVerticalBox::Slot().AutoHeight()
 						[
-							SNew(SBox).WidthOverride(48.0f).HeightOverride(48.0f)
+							SNew(SButton)
+							.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+							.ContentPadding(0.0f)
+							.ToolTipText(LOCTEXT("OpenCandidateTip", "点击放大查看"))
+							.OnClicked_Lambda([this]()
+							{
+								OpenImageViewer(FocusedPreviewPath, TEXT("基础贴图 · 候选"));
+								return FReply::Handled();
+							})
 							[
-								SNew(SImage).Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
+								SNew(SBox).WidthOverride(48.0f).HeightOverride(48.0f)
+								[
+									SNew(SImage).Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
+								]
 							]
 						]
 						+ SVerticalBox::Slot().AutoHeight()
@@ -889,15 +930,15 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildChannelThumb(const FString& S
 		[
 			SNew(SButton)
 			.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+			.ContentPadding(0.0f)
 			.ToolTipText(FText::Format(
-				LOCTEXT("ChannelTip", "点击在右栏放大做 2×2 平铺自检\n{0}"),
+				LOCTEXT("ChannelTip", "点击放大查看（可切 2×2 平铺看接缝）\n{0}"),
 				FText::FromString(Spec ? Spec->Role : FString())))
 			.OnClicked_Lambda([this, Semantic]()
 			{
-				if (const FString* Path = ChannelPngPaths.Find(Semantic))
-				{
-					FocusedPreviewPath = *Path;
-				}
+				OpenImageViewer(
+					GetChannelPngPath(Semantic),
+					ComfyChannels::DisplayName(Semantic));
 				return FReply::Handled();
 			})
 			[
@@ -1834,6 +1875,62 @@ void SComfyTextureStudioPanel::ReleasePreviewTextures()
 		}
 	}
 	TextureCache.Reset();
+}
+
+void SComfyTextureStudioPanel::OpenImageViewer(const FString& PngPath, const FString& Title, bool bStartTiled)
+{
+	if (PngPath.IsEmpty())
+	{
+		return;
+	}
+
+	// 无头环境（commandlet 里跑 -CtsTestPanel）没有 Slate —— 静默跳过，别崩
+	if (!FSlateApplication::IsInitialized())
+	{
+		UE_LOG(LogComfyTextureStudioEditor, Warning,
+			TEXT("查看器跳过：Slate 未初始化（无头模式）。"));
+		return;
+	}
+
+	// 查看器自己加载并持有贴图 + brush（见 ComfyPreviewTexture 的注释）。
+	// 不复用本面板的 brush 缓存：面板析构会把贴图 RemoveFromRoot，
+	// 那时若窗口还开着，复用的 brush 就是悬空引用。
+	const TSharedPtr<FComfyPreviewTexture> Preview = FComfyPreviewTexture::LoadFromPng(PngPath);
+	if (!Preview.IsValid())
+	{
+		UE_LOG(LogComfyTextureStudioEditor, Warning, TEXT("查看器加载 PNG 失败：%s"), *PngPath);
+		return;
+	}
+
+	const FVector2D ImageSize = Preview->GetImageSize();
+	const FString HeaderText = FString::Printf(TEXT("%s   %d × %d"),
+		*Title,
+		FMath::RoundToInt(ImageSize.X),
+		FMath::RoundToInt(ImageSize.Y));
+
+	const TSharedRef<SWindow> Window = SNew(SWindow)
+		.Title(FText::FromString(FString::Printf(TEXT("%s · %s"),
+			*Title, *FPaths::GetCleanFilename(PngPath))))
+		.ClientSize(FVector2D(920.0, 780.0))
+		.SupportsMinimize(true)
+		.SupportsMaximize(true)
+		.SizingRule(ESizingRule::UserSized)
+		[
+			SNew(SComfyImageViewer)
+			.Preview(Preview)
+			.Title(FText::FromString(HeaderText))
+			.StartTiled(bStartTiled)
+		];
+
+	// 层叠摆放：连开几个窗口对比贴图时，不会完全叠在一起
+	static int32 CascadeIndex = 0;
+	const FVector2D Origin(160.0, 130.0);
+	const FVector2D Cascade(28.0, 24.0);
+	Window->MoveWindowTo(Origin + Cascade * static_cast<double>(CascadeIndex % 10));
+	++CascadeIndex;
+
+	FSlateApplication::Get().AddWindow(Window);
+	Window->BringToFront();
 }
 
 // --------------------------------------------------------------------------- //

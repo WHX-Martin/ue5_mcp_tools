@@ -89,6 +89,16 @@ private:
 	const FSlateBrush* GetPreviewBrush(const FString& PngPath);
 	void ReleasePreviewTextures();
 
+	/**
+	 * 在独立窗口里放大查看某张 PNG。
+	 *
+	 * 面板里的预览最大只有 150px，而贴图是 1024² —— 接缝与噪点根本看不出来。
+	 * **每次调用都新建一个窗口**（不复用）：并排对比 albedo / normal 时正需要这个。
+	 *
+	 * @param bStartTiled 打开时直接进 2×2 平铺模式（点面板上的平铺图时用）
+	 */
+	void OpenImageViewer(const FString& PngPath, const FString& Title, bool bStartTiled = false);
+
 	// -------------------------------------------------------------- 选项读写 //
 	UTexture2D* LoadTransientTexture(const FString& PngPath);
 
