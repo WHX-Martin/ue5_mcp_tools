@@ -11,13 +11,13 @@
 #pragma once
 
 #include "ComfyHttpClient.h"
+#include "ComfyPromptScaffold.h"
 #include "ComfyTextureJob.h"
 #include "ComfyImportTypes.h"
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
 
-class UTexture2D;
-struct FSlateDynamicImageBrush;   // 注意是 struct，不是 class（不一致会触发 C4099）
+class FComfyPreviewTexture;
 struct FComfyOutputAssetSpec;
 
 /** 面板里的一次导入结果（供 §7.4 的报告区展示）。 */
@@ -86,6 +86,8 @@ private:
 	FText GetResolvedNamePreview() const;
 
 	// ---------------------------------------------------------------- 缩略图 //
+	/** 取预览资源；文件读不到且缓存里也没有时返回 nullptr。 */
+	TSharedPtr<FComfyPreviewTexture> GetPreviewTexture(const FString& PngPath);
 	const FSlateBrush* GetPreviewBrush(const FString& PngPath);
 	void ReleasePreviewTextures();
 
@@ -100,8 +102,6 @@ private:
 	void OpenImageViewer(const FString& PngPath, const FString& Title, bool bStartTiled = false);
 
 	// -------------------------------------------------------------- 选项读写 //
-	UTexture2D* LoadTransientTexture(const FString& PngPath);
-
 	// ------------------------------------------------------------- 通道路径 //
 	FString GetChannelPngPath(const FString& Semantic) const;
 
@@ -137,14 +137,35 @@ private:
 	/** 6 个通道的本地 PNG 路径（阶段 B 完成后填充）。 */
 	TMap<FString, FString> ChannelPngPaths;
 
-	/** 透明贴图缓存（key = PNG 绝对路径）。 */
-	TMap<FString, TObjectPtr<UTexture2D>> TextureCache;
-	TMap<FString, TSharedPtr<FSlateDynamicImageBrush>> BrushCache;
+	/**
+	 * 预览资源缓存（key = PNG 绝对路径）。
+	 *
+	 * 用 FComfyPreviewTexture 而不是「裸 UTexture2D + 裸 brush」：它自带
+	 * AddToRoot/RemoveFromRoot 与 brush 的强引用，这份资源可以**安全地共享给查看器窗口**
+	 * （引用计数保证窗口活着贴图就活着）。
+	 *
+	 * 共享是必需的，不只是省事：导入完成后中转 PNG 会被删掉
+	 * （Settings::PreserveDownloadedPng 默认 false），查看器若重新读盘就会打不开 ——
+	 * 2026-10-13 用户报的「关掉预览窗口后再点没反应」正是这个。
+	 */
+	TMap<FString, TSharedPtr<FComfyPreviewTexture>> PreviewCache;
 
 	// ---- 阶段 A 参数 ----
-	FString MaterialDescription = TEXT("coarse pebbly sand, beige, weathered, scattered small stones");
+	/**
+	 * 正向提示词的编辑状态（固定骨架 + 可编辑的描述）。
+	 *
+	 * 逻辑全在 ComfyPrompt::FComfyPromptEditor 里，**不在这里手写拼接** ——
+	 * 2026-10-13 的事故就是"每次编辑都从完整提示词反推骨架"，描述被清空的瞬间
+	 * 骨架被吞掉且永久丢失。那段逻辑原来藏在面板的匿名命名空间里，
+	 * 既没法单测也不能回归，所以现在抽出去配 `-TestPromptScaffold` 负向测试。
+	 */
+	ComfyPrompt::FComfyPromptEditor PromptEditor;
 	FString NegativePrompt;
-	FString PositivePrompt;
+
+	/** manifest 里的采样器/调度默认值 —— 探测拿到真实枚举后要回退到它，而不是列表第 0 项。 */
+	FString SamplerDefault = TEXT("dpmpp_2m");
+	FString SchedulerDefault = TEXT("karras");
+
 	int32 Seed = 20261013;
 	int32 Steps = 30;
 	float CFG = 6.5f;

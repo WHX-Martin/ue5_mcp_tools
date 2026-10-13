@@ -55,106 +55,49 @@ namespace
 	/** 参数行：固定宽度的标签 + 内容。 */
 	FSlateFontInfo SectionFont() { return FCoreStyle::GetDefaultFontStyle("Bold", 11); }
 
-	// ------------------------------------------------------------ 提示词拆分 //
+	// -------------------------------------------------- 提示词骨架/拆分的逻辑 //
+	// 已经搬到 Runtime 模块的 ComfyPromptScaffold.h/.cpp（ComfyPrompt::Split /
+	// Join / FComfyPromptEditor）。搬家的理由：原来的实现在这里（Slate widget 的
+	// 匿名命名空间内），既不能单测也不能在 commandlet 里回归 —— 于是"编辑描述会
+	// 悄悄丢骨架"这个缺陷存在了很久没人发现。现在它由 `-TestPromptScaffold` 守着。
 
 	/**
-	 * 把正向提示词拆成「固定前缀 / 材质描述 / 固定后缀」。
+	 * 在枚举下拉里挑一个可用值：优先保留当前选中的，其次回退到 Preferred，
+	 * 都没有才取第一项。
 	 *
-	 * 这是**启发式**，不是真理：前后缀由 LoRA 训练集决定（工作流 note 明确要求不要改）。
-	 * 之所以敢用启发式，是因为拆分结果**会显示在输入框里让人看到**，而且完整文本
-	 * 在折叠区可直接编辑 —— 推断错了用户立刻能发现并纠正，不存在静默出错。
+	 * **不要用 `Options[0]` 代替它。** ComfyUI 返回的枚举顺序与"我们希望默认哪个"
+	 * 毫无关系 —— `sampler_name` 第一项是 euler、`scheduler` 第一项是 normal，
+	 * 拿 [0] 当默认值就等于每次探测都悄悄改配置。
 	 */
-	struct FPromptScaffold
+	TSharedPtr<FString> PickValidOption(
+		const TArray<TSharedPtr<FString>>& Options,
+		const TSharedPtr<FString>& Current,
+		const FString& Preferred)
 	{
-		FString Prefix;
-		FString Description;
-		FString Suffix;
-	};
-
-	bool IsStyleToken(const FString& Segment)
-	{
-		static const TCHAR* Keys[] = {
-			TEXT("mtrlx"), TEXT("seamless"), TEXT("tileable"), TEXT("pbr"), TEXT("material")
-		};
-		for (const TCHAR* Key : Keys)
+		auto Find = [&Options](const FString& Value) -> TSharedPtr<FString>
 		{
-			if (Segment.Contains(Key, ESearchCase::IgnoreCase))
+			for (const TSharedPtr<FString>& Item : Options)
 			{
-				return true;
+				if (Item.IsValid() && *Item == Value)
+				{
+					return Item;
+				}
+			}
+			return nullptr;
+		};
+
+		if (Current.IsValid())
+		{
+			if (TSharedPtr<FString> Kept = Find(*Current))
+			{
+				return Kept;
 			}
 		}
-		return false;
-	}
-
-	bool IsRenderToken(const FString& Segment)
-	{
-		static const TCHAR* Keys[] = {
-			TEXT("lighting"), TEXT("sunlight"), TEXT("light"), TEXT("shadow"), TEXT("relief"),
-			TEXT("detail"), TEXT("frequency"), TEXT("raking"), TEXT("crisp"), TEXT("soft"),
-			TEXT("visible"), TEXT("scale pattern"), TEXT("top-down")
-		};
-		for (const TCHAR* Key : Keys)
+		if (TSharedPtr<FString> Fallback = Find(Preferred))
 		{
-			if (Segment.Contains(Key, ESearchCase::IgnoreCase))
-			{
-				return true;
-			}
+			return Fallback;
 		}
-		return false;
-	}
-
-	FPromptScaffold SplitPrompt(const FString& Prompt)
-	{
-		FPromptScaffold Out;
-
-		TArray<FString> Segments;
-		Prompt.ParseIntoArray(Segments, TEXT(","), /*InCullEmpty=*/true);
-		for (FString& S : Segments)
-		{
-			S.TrimStartAndEndInline();
-		}
-		if (Segments.Num() == 0)
-		{
-			Out.Description = Prompt;
-			return Out;
-		}
-
-		// 前缀：从头开始连续的「风格/技术」段
-		int32 First = 0;
-		while (First < Segments.Num() && IsStyleToken(Segments[First]))
-		{
-			++First;
-		}
-		// 后缀：从尾开始连续的「渲染/光照」段
-		int32 Last = Segments.Num() - 1;
-		while (Last >= First && IsRenderToken(Segments[Last]))
-		{
-			--Last;
-		}
-
-		// 拆不出中间的描述（全被划成前后缀）时，退化为「整条都当描述」，不做切割。
-		if (Last < First)
-		{
-			Out.Description = Prompt;
-			return Out;
-		}
-
-		Out.Prefix = FString::Join(TArray<FString>(Segments.GetData(), First), TEXT(", "));
-		Out.Description = FString::Join(
-			TArray<FString>(Segments.GetData() + First, Last - First + 1), TEXT(", "));
-		Out.Suffix = FString::Join(
-			TArray<FString>(Segments.GetData() + Last + 1, Segments.Num() - Last - 1), TEXT(", "));
-
-		return Out;
-	}
-
-	FString JoinPromptParts(const FString& Prefix, const FString& Description, const FString& Suffix)
-	{
-		TArray<FString> Parts;
-		if (!Prefix.IsEmpty())      { Parts.Add(Prefix); }
-		if (!Description.IsEmpty()) { Parts.Add(Description); }
-		if (!Suffix.IsEmpty())      { Parts.Add(Suffix); }
-		return FString::Join(Parts, TEXT(", "));
+		return Options.Num() > 0 ? Options[0] : Current;
 	}
 
 	/** 面板里的只读小标签。 */
@@ -204,17 +147,46 @@ void SComfyTextureStudioPanel::Construct(const FArguments& InArgs)
 				const FString GraphPath = FComfyTextureImportService::ResolvePluginPath(StageA->ApiWorkflowFile);
 				if (Graph.LoadFromFile(GraphPath, *StageA, Error))
 				{
+					// 骨架在这里**只初始化一次**，之后由 PromptEditor 持有，
+					// 描述框怎么改都不会动它（见 ComfyPromptScaffold.h 的说明）。
 					FString Prompt;
 					if (Graph.GetSlotValueAsString(TEXT("positive"), Prompt) && !Prompt.IsEmpty())
 					{
-						const FPromptScaffold Scaffold = SplitPrompt(Prompt);
-						PositivePrompt = Prompt;              // 完整文本（提交用）
-						MaterialDescription = Scaffold.Description;
+						PromptEditor.ResetFromPrompt(Prompt);
 					}
+					else
+					{
+						UE_LOG(LogComfyTextureStudioEditor, Warning,
+							TEXT("读不到 stageA 的 positive 槽位，正向提示词会为空。"));
+					}
+
 					FString Neg;
 					if (Graph.GetSlotValueAsString(TEXT("negative"), Neg))
 					{
 						NegativePrompt = Neg;
+					}
+				}
+				else
+				{
+					UE_LOG(LogComfyTextureStudioEditor, Warning,
+						TEXT("装载阶段A 工作流失败：%s"), *Error);
+				}
+
+				// 采样器/调度的默认值也来自 manifest。之前这里硬编码，而 ProbeServer
+				// 拿到真实枚举后又无条件重置成列表第 0 项 —— ComfyUI 的 sampler_name
+				// 第一项正好是 euler，于是「打开面板」就会把默认的 dpmpp_2m 换掉。
+				if (const FComfySlotBinding* SamplerSlot = StageA->Slots.Find(TEXT("sampler")))
+				{
+					if (SamplerSlot->Default.IsValid())
+					{
+						SamplerDefault = SamplerSlot->Default->AsString();
+					}
+				}
+				if (const FComfySlotBinding* SchedulerSlot = StageA->Slots.Find(TEXT("scheduler")))
+				{
+					if (SchedulerSlot->Default.IsValid())
+					{
+						SchedulerDefault = SchedulerSlot->Default->AsString();
 					}
 				}
 			}
@@ -261,9 +233,10 @@ void SComfyTextureStudioPanel::Construct(const FArguments& InArgs)
 	LoraName = LoraDefault;
 	LoraOptions.Add(MakeShared<FString>(LoraDefault.IsEmpty() ? TEXT("(默认)") : LoraDefault));
 
-	// 采样器/调度的初始候选（随后由 /object_info 覆盖为真实枚举）
-	SamplerOptions.Add(MakeShared<FString>(TEXT("dpmpp_2m")));
-	SchedulerOptions.Add(MakeShared<FString>(TEXT("karras")));
+	// 采样器/调度的初始候选（随后由 /object_info 覆盖为真实枚举）。
+	// 初值取 manifest 的默认值，别写死 —— 写死的话一旦 manifest 改了就对不上。
+	SamplerOptions.Add(MakeShared<FString>(SamplerDefault));
+	SchedulerOptions.Add(MakeShared<FString>(SchedulerDefault));
 	SelectedSampler = SamplerOptions[0];
 	SelectedScheduler = SchedulerOptions[0];
 
@@ -436,21 +409,12 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildStageASection()
 			SNew(SBox).MinDesiredHeight(46.0f)
 			[
 				SNew(SMultiLineEditableTextBox)
-				.Text_Lambda([this]() { return FText::FromString(MaterialDescription); })
+				.Text_Lambda([this]() { return FText::FromString(PromptEditor.GetDescription()); })
 				.OnTextChanged_Lambda([this](const FText& NewText)
 				{
-					MaterialDescription = NewText.ToString();
-					// 描述改了 → 重拼完整提示词（前后缀来自 LoRA 训练集，保持不变）
-					const FPromptScaffold Scaffold = SplitPrompt(PositivePrompt);
-					if (!Scaffold.Prefix.IsEmpty() || !Scaffold.Suffix.IsEmpty())
-					{
-						PositivePrompt = JoinPromptParts(
-							Scaffold.Prefix, MaterialDescription, Scaffold.Suffix);
-					}
-					else
-					{
-						PositivePrompt = MaterialDescription;
-					}
+					// 只换描述。**不要在这里重新推导骨架** —— 描述被清空（全选重打必然
+					// 经过这个中间态）时，启发式会把骨架当成描述一起吞掉且永久丢失。
+					PromptEditor.SetDescription(NewText.ToString());
 				})
 				.AutoWrapText(true)
 			],
@@ -460,8 +424,22 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildStageASection()
 	Box->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
 	[
 		MakeNote(LOCTEXT("DescHint",
-			"ⓘ 前后固定 tag 来自 LoRA 训练集，请勿修改。完整提示词见下方折叠区。"))
+			"ⓘ 前后固定 tag 来自 LoRA 训练集，改描述不会动它们。完整提示词见下方折叠区。"))
 	];
+
+	// 骨架异常必须可见 —— 没有这行的话，提示词退化成一个裸描述是完全静默的
+	{
+		const FString PromptWarning = PromptEditor.GetWarning();
+		if (!PromptWarning.IsEmpty())
+		{
+			Box->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
+			[
+				MakeNote(FText::Format(
+					LOCTEXT("ScaffoldWarn", "⚠ {0}"),
+					FText::FromString(PromptWarning)), ColorWarn)
+			];
+		}
+	}
 
 	// 完整正向提示词（可直接改）
 	Box->AddSlot().AutoHeight().Padding(0, 2)
@@ -474,8 +452,14 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildStageASection()
 			SNew(SBox).MinDesiredHeight(60.0f).Padding(0, 2)
 			[
 				SNew(SMultiLineEditableTextBox)
-				.Text_Lambda([this]() { return FText::FromString(PositivePrompt); })
-				.OnTextChanged_Lambda([this](const FText& NewText) { PositivePrompt = NewText.ToString(); })
+				.Text_Lambda([this]() { return FText::FromString(PromptEditor.GetFullPrompt()); })
+				.OnTextChanged_Lambda([this](const FText& NewText)
+				{
+					// 逃生舱：允许在这里连骨架一起改。但 SetFullPrompt 只在**重新拆得出
+					// 骨架**时才覆盖骨架 —— 拆不出就保留原样并按新描述重拼，
+					// 免得一次误删把 LoRA 触发词永久抹掉。
+					PromptEditor.SetFullPrompt(NewText.ToString());
+				})
 				.AutoWrapText(true)
 			]
 		]
@@ -1098,7 +1082,7 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildImportSection()
 			.OnClicked_Lambda([this]()
 			{
 				FString M, G;
-				FComfyAssetNaming::SuggestFromDescription(MaterialDescription, M, G);
+				FComfyAssetNaming::SuggestFromDescription(PromptEditor.GetDescription(), M, G);
 				TemplateMaterial = M;
 				TemplateGrain = G;
 				return FReply::Handled();
@@ -1274,8 +1258,24 @@ void SComfyTextureStudioPanel::StartStageA(bool bNewSeed)
 		Seed = FMath::RandRange(1, 2147483646);
 	}
 
+	// 把完整提示词与采样参数记进日志。2026-10-13 那次提示词悄悄退化成一条裸描述，
+	// 事后只能从 stage_a_api.json 反查 —— 这次让它当场可查。
+	UE_LOG(LogComfyTextureStudioEditor, Log,
+		TEXT("阶段A 提交 · 提示词 %d 字 · 采样器 %s/%s · 种子 %d"),
+		PromptEditor.GetFullPrompt().Len(),
+		SelectedSampler.IsValid() ? **SelectedSampler : TEXT("(默认)"),
+		SelectedScheduler.IsValid() ? **SelectedScheduler : TEXT("(默认)"),
+		Seed);
+	UE_LOG(LogComfyTextureStudioEditor, Log, TEXT("  正向：%s"), *PromptEditor.GetFullPrompt());
+	if (!PromptEditor.HasScaffold())
+	{
+		UE_LOG(LogComfyTextureStudioEditor, Warning,
+			TEXT("  提示词骨架缺失（%s）—— 出图可能缺少光照/几何线索，阶段B 的法线会偏平。"),
+			*PromptEditor.GetWarning());
+	}
+
 	FComfyTextureJobParams Params;
-	Params.PositivePrompt = PositivePrompt;
+	Params.PositivePrompt = PromptEditor.GetFullPrompt();
 	Params.NegativePrompt = NegativePrompt;
 	Params.Seed = Seed;
 	Params.Steps = Steps;
@@ -1459,14 +1459,13 @@ void SComfyTextureStudioPanel::ProbeServer()
 
 		CacheEnumFromObjectInfo(ObjectInfo, TEXT("KSampler"), TEXT("sampler_name"), SamplerOptions);
 		CacheEnumFromObjectInfo(ObjectInfo, TEXT("KSampler"), TEXT("scheduler"), SchedulerOptions);
-		if (SamplerOptions.Num() > 0)
-		{
-			SelectedSampler = SamplerOptions[0];
-		}
-		if (SchedulerOptions.Num() > 0)
-		{
-			SelectedScheduler = SchedulerOptions[0];
-		}
+
+		// 这里的回退必须「只在当前值确实不在新列表里」时才发生，与上面 LoraName 一致。
+		// 绝不能无条件取 [0]：ComfyUI 的 sampler_name 列表第一项是 euler、scheduler
+		// 第一项是 normal/simple，于是「打开面板」这个动作就会把 manifest 的
+		// dpmpp_2m/karras 悄悄换掉 —— 2026-10-13 用户那次跑出 euler/simple 就是这么来的。
+		SelectedSampler = PickValidOption(SamplerOptions, SelectedSampler, SamplerDefault);
+		SelectedScheduler = PickValidOption(SchedulerOptions, SelectedScheduler, SchedulerDefault);
 	});
 }
 
@@ -1816,65 +1815,35 @@ FText SComfyTextureStudioPanel::GetResolvedNamePreview() const
 // 缩略图
 // --------------------------------------------------------------------------- //
 
-UTexture2D* SComfyTextureStudioPanel::LoadTransientTexture(const FString& PngPath)
-{
-	TArray<uint8> Bytes;
-	if (!FFileHelper::LoadFileToArray(Bytes, *PngPath))
-	{
-		return nullptr;
-	}
-	// FImageUtils 会按文件头识别格式，PNG 由 ImageWrapper 模块提供解码
-	UTexture2D* Texture = FImageUtils::ImportBufferAsTexture2D(Bytes);
-	if (!Texture)
-	{
-		return nullptr;
-	}
-	// 它是 transient 且只被我们引用：不 AddToRoot 会被 GC 掉（表现是预览变白）
-	Texture->AddToRoot();
-	return Texture;
-}
-
-const FSlateBrush* SComfyTextureStudioPanel::GetPreviewBrush(const FString& PngPath)
+TSharedPtr<FComfyPreviewTexture> SComfyTextureStudioPanel::GetPreviewTexture(const FString& PngPath)
 {
 	if (PngPath.IsEmpty())
 	{
 		return nullptr;
 	}
-	if (const TSharedPtr<FSlateDynamicImageBrush>* Found = BrushCache.Find(PngPath))
+
+	if (TSharedPtr<FComfyPreviewTexture>* Found = PreviewCache.Find(PngPath))
 	{
-		return Found->Get();
-	}
-	if (TextureCache.Contains(PngPath))
-	{
-		return nullptr; // 之前加载失败过，不再重试（避免每帧重读磁盘）
+		return *Found;   // 可能为 nullptr：之前加载失败过，不再每帧重读磁盘
 	}
 
-	UTexture2D* Texture = LoadTransientTexture(PngPath);
-	if (!Texture)
-	{
-		TextureCache.Add(PngPath, nullptr);
-		return nullptr;
-	}
+	TSharedPtr<FComfyPreviewTexture> Loaded = FComfyPreviewTexture::LoadFromPng(PngPath);
+	PreviewCache.Add(PngPath, Loaded);
+	return Loaded;
+}
 
-	const FVector2D Size(static_cast<float>(Texture->GetSizeX()), static_cast<float>(Texture->GetSizeY()));
-	TSharedPtr<FSlateDynamicImageBrush> Brush = MakeShared<FSlateDynamicImageBrush>(
-		Texture, Size, FName(*PngPath));
-	BrushCache.Add(PngPath, Brush);
-	TextureCache.Add(PngPath, Texture);
-	return Brush.Get();
+const FSlateBrush* SComfyTextureStudioPanel::GetPreviewBrush(const FString& PngPath)
+{
+	const TSharedPtr<FComfyPreviewTexture> Preview = GetPreviewTexture(PngPath);
+	return Preview.IsValid() ? Preview->GetBrush() : nullptr;
 }
 
 void SComfyTextureStudioPanel::ReleasePreviewTextures()
 {
-	BrushCache.Reset();
-	for (TPair<FString, TObjectPtr<UTexture2D>>& Pair : TextureCache)
-	{
-		if (Pair.Value)
-		{
-			Pair.Value->RemoveFromRoot();
-		}
-	}
-	TextureCache.Reset();
+	// FComfyPreviewTexture 自己负责 RemoveFromRoot。**注意这里的 Reset 只是让面板
+	// 不再持有**：如果有查看器窗口还开着，它持有同一份资源的引用，贴图不会被释放
+	// （这正是把缓存从「裸 UTexture2D + 裸 brush」换成它要换来的性质）。
+	PreviewCache.Reset();
 }
 
 void SComfyTextureStudioPanel::OpenImageViewer(const FString& PngPath, const FString& Title, bool bStartTiled)
@@ -1892,13 +1861,30 @@ void SComfyTextureStudioPanel::OpenImageViewer(const FString& PngPath, const FSt
 		return;
 	}
 
-	// 查看器自己加载并持有贴图 + brush（见 ComfyPreviewTexture 的注释）。
-	// 不复用本面板的 brush 缓存：面板析构会把贴图 RemoveFromRoot，
-	// 那时若窗口还开着，复用的 brush 就是悬空引用。
-	const TSharedPtr<FComfyPreviewTexture> Preview = FComfyPreviewTexture::LoadFromPng(PngPath);
+	// 走面板的缓存（与缩略图共享同一个 FComfyPreviewTexture，靠引用计数保命）。
+	//
+	// **这里不能重新读盘。** 导入完成后中转 PNG 会被删掉
+	// （Settings::PreserveDownloadedPng 默认 false），而面板上的缩略图早在图还在时
+	// 就加载好了 —— 于是现象变成「缩略图分明看得见，点开却没反应」。
+	// 2026-10-13 用户报的「关掉预览窗口后再点打不开」就是这个。
+	const TSharedPtr<FComfyPreviewTexture> Preview = GetPreviewTexture(PngPath);
 	if (!Preview.IsValid())
 	{
-		UE_LOG(LogComfyTextureStudioEditor, Warning, TEXT("查看器加载 PNG 失败：%s"), *PngPath);
+		UE_LOG(LogComfyTextureStudioEditor, Warning,
+			TEXT("查看器打开失败：预览资源不可用（文件已不在磁盘，内存里也没有副本）：%s"), *PngPath);
+
+		// 明确告诉用户为什么，别静默失败 —— 否则和"点了没反应"没区别
+		FNotificationInfo Info(FText::Format(
+			LOCTEXT("ViewerFailed",
+				"打不开预览：{0}\n该中转 PNG 已不在磁盘上（导入后会被清理），且本次会话没有它的内存副本。"),
+			FText::FromString(FPaths::GetCleanFilename(PngPath))));
+		Info.ExpireDuration = 6.0f;
+		Info.bUseSuccessFailIcons = true;
+		if (TSharedPtr<SNotificationItem> Item =
+			FSlateNotificationManager::Get().AddNotification(Info))
+		{
+			Item->SetCompletionState(SNotificationItem::CS_Fail);
+		}
 		return;
 	}
 

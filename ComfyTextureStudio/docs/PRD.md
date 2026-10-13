@@ -148,6 +148,15 @@ lit render（环面 padding，严格四方连续）
   crisp fine detail, high frequency texture, small scale pattern
   ```
   > ⚠️ 前 9 个 tag 是 LoRA 训练时的固定触发词（受光渲染版），**必须保留**，否则 LoRA 不生效或出图不带起伏。
+  >
+  > **实现约束（M2.3 补录）**：UI 把这条提示词拆成「固定前缀 / 材质描述 / 固定后缀」三段，
+  > 用户编辑的只是中间那段。**骨架必须由 `ComfyPrompt::FComfyPromptEditor` 持有，
+  > 严禁每次编辑后从完整文本重新推导** —— 拆分是启发式的，描述被清空时（全选重打必然经过）
+  > 它会判定"整条都是前后缀"并返回空骨架，于是前缀被永久丢弃且完全静默。
+  > 后果不是少几个词：`directional sunlight` / `raking light` / `crisp fine detail`
+  > 决定基础贴图带不带几何线索，而**阶段B 的 DSINE 靠明暗反推几何** ——
+  > 丢掉它们之后法线会几乎全平（实测强度 0.1620 → 0.0191），
+  > 用户看到的就是"PBR 和基础色对不上"。回归测试：`-TestPromptScaffold`。
 - 负向提示（默认折叠）：工作流原值，含 `tiling seam, visible grid, tile border, depth map, normal map, displacement map, uv checker`——**不要删这些**，它们是把接缝类伪影压下去的关键。
 - 出图参数：seed（含 🎲 随机 / 🔒 锁种子）、steps、cfg、sampler、scheduler、尺寸
 - LoRA 选择 + `strength_model` / `strength_clip`

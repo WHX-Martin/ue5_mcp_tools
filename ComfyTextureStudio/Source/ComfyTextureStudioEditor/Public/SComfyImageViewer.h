@@ -126,6 +126,9 @@ public:
 	 */
 	bool HasPreview() const;
 
+	/** 「用系统看图器打开」是否可用 —— 中转 PNG 被清理后就没法外部打开了。 */
+	bool CanOpenExternally() const;
+
 private:
 	TSharedRef<SWidget> BuildToolbar();
 	FText GetZoomText() const;

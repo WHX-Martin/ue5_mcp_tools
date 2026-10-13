@@ -3,6 +3,7 @@
 #include "ComfyPreviewTexture.h"
 #include "HAL/PlatformProcess.h"
 #include "Input/CursorReply.h"
+#include "Misc/Paths.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateLayoutTransform.h"
 #include "Styling/CoreStyle.h"
@@ -303,15 +304,28 @@ bool SComfyImageViewer::HasPreview() const
 	return Preview.IsValid() && Preview->GetBrush() != nullptr;
 }
 
+bool SComfyImageViewer::CanOpenExternally() const
+{
+	// 导出/外部打开靠的是磁盘上的原文件，而中转 PNG 在导入后会被清理。
+	// 文件没了就禁用按钮 —— 比点下去毫无反应好。
+	return Preview.IsValid()
+		&& !Preview->GetPngPath().IsEmpty()
+		&& FPaths::FileExists(Preview->GetPngPath());
+}
+
 TSharedRef<SWidget> SComfyImageViewer::BuildToolbar()
 {
-	// 按钮统一尺寸，免得一长一短看着乱
-	const auto MakeButton = [this](const FText& Label, const FText& Tip, TFunction<FReply()> Action)
+	// 按钮统一尺寸，免得一长一短看着乱。
+	// Enabled 走构造期的属性（Slate 的 .IsEnabled 只能在这里给，TSharedRef<SButton> 上没有）：
+	// 不用会失效的「用系统看图器打开」按钮比点了没反应好。
+	const auto MakeButton = [this](const FText& Label, const FText& Tip,
+		TFunction<FReply()> Action, TAttribute<bool> Enabled = TAttribute<bool>(true))
 	{
 		return SNew(SButton)
 			.ButtonStyle(FCoreStyle::Get(), "Button")
 			.ContentPadding(FMargin(8.0f, 3.0f))
 			.ToolTipText(Tip)
+			.IsEnabled(Enabled)
 			.OnClicked_Lambda([Action = MoveTemp(Action)]()
 			{
 				return Action();
@@ -377,15 +391,19 @@ TSharedRef<SWidget> SComfyImageViewer::BuildToolbar()
 			+ SHorizontalBox::Slot().AutoWidth()
 			[
 				MakeButton(LOCTEXT("External", "用系统看图器打开"),
-					LOCTEXT("ExternalTip", "交给系统默认看图程序（看超大贴图时更顺手）"),
+					LOCTEXT("ExternalTip",
+						"交给系统默认看图程序（看超大贴图时更顺手）\n"
+						"注：导入后中转 PNG 会被清理，那时此按钮不可用"),
 					[this]()
 					{
-						if (Preview.IsValid() && !Preview->GetPngPath().IsEmpty())
+						if (CanOpenExternally())
 						{
-							FPlatformProcess::LaunchFileInDefaultExternalApplication(*Preview->GetPngPath());
+							FPlatformProcess::LaunchFileInDefaultExternalApplication(
+								*Preview->GetPngPath());
 						}
 						return FReply::Handled();
-					})
+					},
+					TAttribute<bool>::CreateSP(this, &SComfyImageViewer::CanOpenExternally))
 			]
 		];
 }

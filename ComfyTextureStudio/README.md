@@ -24,6 +24,7 @@
 | [`docs/M1-report.md`](docs/M1-report.md) | **M1 报告**：插件骨架 + 后端打通；编译链、commandlet 用法、7 个实现坑 |
 | [`docs/M2-report.md`](docs/M2-report.md) | **M2 报告**：面板 + 导入 + 材质；三层验证结果、2 个自引入 bug（含一个崩溃）、未验证项清单 |
 | [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md) | **M2.1 补丁**：SamplerType 编译失败的三条根因（规范写错 / 自检盲区 / 编译假绿灯）、修复与负向回归测试 |
+| [`docs/M2.3-prompt-scaffold-and-viewer.md`](docs/M2.3-prompt-scaffold-and-viewer.md) | **M2.3 补丁**：「PBR 与基础色对不上」的根因链（提示词骨架被静默丢弃 + 采样器被探测改掉）、预览窗口打不开的根因、排查方法论 |
 | [`Config/Workflows/workflows.manifest.json`](Config/Workflows/workflows.manifest.json) | 语义槽位映射（机器可读），C++ 侧按语义键读写，**不硬编码节点 id** |
 | **[`Resources/README.md`](Resources/README.md)** | **节点包纳管说明** · 依赖链 · 安装与同步流程 |
 
@@ -139,6 +140,7 @@ curl -skL -m 900 \
 - [x] **M2**：Editor 模块 —— Slate 三态面板、贴图导入（§6.3 属性表逐项自检）、材质图 + BumpOffset 视差 + 材质实例
 - [x] **M2.1**：修复 SamplerType 与贴图压缩格式不符（材质在编辑器里编译报红字）+ 揭穿"编译 0 错误"假绿灯
 - [x] **M2.2**：图片查看器 —— 面板里所有图点击即弹独立窗口（滚轮缩放 / 拖拽平移 / 2×2 平铺 / 转系统看图器）
+- [x] **M2.3**：修复提示词骨架在编辑描述时被静默丢弃（出图失几何线索 → 法线几乎全平）+ 采样器默认值被探测覆盖 + 预览窗口依赖已清理的 PNG
 - [ ] **M3**：WebSocket 进度 / 取消过渡态 / 参数预设 / 资产浏览器右键入口
 - [ ] **M4**：批量候选 / 任意图→PBR / Nanite 位移 / Upscale 接入
 
@@ -158,6 +160,17 @@ curl -skL -m 900 \
 
 **M2.1 实测结论：SamplerType 自检 4/4、冷加载核对 41 项 0 项不符、负向回归 8/8。**
 详见 [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md)。
+
+**M2.3 实测结论：提示词骨架负向回归 13/13、冷加载核对 41 项 0 项不符。**
+端到端复跑对比用户出问题那次 —— 法线强度 0.0191 → **0.1620**、高度图对比度 15.04 → **30.84**，
+差距只来自阶段A 的提示词是否带骨架（LoRA 触发词 + 光照/细节 tag）。
+详见 [`docs/M2.3-prompt-scaffold-and-viewer.md`](docs/M2.3-prompt-scaffold-and-viewer.md)。
+
+> ⚠️ **提示词骨架不要动。** 描述框只替换「材质描述」那一段，前后固定 tag
+> （`mtrlx` 触发词、`directional sunlight` / `raking light` / `crisp fine detail`）
+> 由 `ComfyPrompt::FComfyPromptEditor` 持有，改描述不会影响它们。
+> 这不是装饰：**阶段B 的 DSINE 靠明暗反推几何**，丢了这些 tag 基础色就没有几何线索，
+> 法线会几乎全平 —— 看起来就是「PBR 和基础色对不上」。
 
 > ⚠️ **M2 的 UI 部分只做到"编译通过 + 逻辑接线"**：当前沙箱无法创建 GUI 窗口，
 > 无头环境下 Slate 未初始化（面板自检会优雅跳过）。面板的视觉与交互需要人工确认，
@@ -212,6 +225,11 @@ MSYS_NO_PATHCONV=1 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.
 :: 断言错误组合被拒、正确组合通过 —— 防止"永远返回 true 的校验器"混过去
 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
   -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestSamplerTypeCheck
+
+:: 提示词骨架编辑模型的负向回归（**不需要 ComfyUI，也不需要任何资产**）
+:: 断言「把描述全选删掉再重打」之后骨架仍在 —— 2026-10-13 那次出图不对就是这里丢的
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestPromptScaffold
 ```
 
 产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`、

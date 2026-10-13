@@ -1,6 +1,7 @@
 #include "ComfyTextureStudioCommandlet.h"
 
 #include "ComfyImportTypes.h"
+#include "ComfyPromptScaffold.h"
 #include "ComfySamplerType.h"
 #include "ComfyTextureJob.h"
 #include "ComfyTextureStudio.h"
@@ -50,6 +51,7 @@ void UComfyTextureStudioCommandlet::PrintUsage()
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("回归测试："));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestLiveness            复现「请求飞行中销毁客户端」的时序，验证存活令牌"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestSamplerTypeCheck    负向验证 SamplerType 校验器（不需要 ComfyUI）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestPromptScaffold      负向验证提示词骨架不会因编辑描述而丢失（不需要 ComfyUI）"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -CtsTestPanel            编辑器启动时组装一次面板并销毁（需 Slate）"));
 }
 
@@ -199,6 +201,146 @@ static int32 RunSamplerTypeCheck()
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  校验器能区分正确与错误的采样类型（含 M2 踩的那两个组合）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	return 0;
+}
+
+/**
+ * 提示词骨架编辑模型的负向回归测试（`-TestPromptScaffold`）。
+ *
+ * 起因（2026-10-13）：用户跑出「PBR 与基础色对不上」。追下去是提交给阶段A 的
+ * 正向提示词只剩 `coarse pebbly sand` —— LoRA 触发词与光照/细节 tag 没了。
+ * diff 两次运行的 stage_a_api.json 才看出来：前一次是完整模板，这次是裸描述。
+ *
+ * 根因：面板的 OnTextChanged 每次都从**已经被重写过的**完整提示词重新推导骨架，
+ * 而 Split 是启发式 —— 描述被清空（全选重打必然经过这个中间态）时它判定
+ * 「整条都像前后缀」→ 退化成「整条当描述」→ 空骨架 → 前缀永久丢失。全程静默。
+ *
+ * 这个测试只证明一件事：**编辑描述（含清空）之后骨架仍在**。
+ * 只跑正例说明不了问题 —— 原实现的正例同样是绿的。
+ */
+static int32 RunPromptScaffoldTest()
+{
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ 提示词骨架编辑模型 · 负向回归 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+
+	const FString Template = TEXT(
+		"mtrlx, seamless tileable PBR material, coarse pebbly sand, beige and grey small stones, "
+		"dense gravel aggregate, square top-down surface, directional sunlight from upper left, "
+		"visible bump relief with soft cast shadows, raking light, crisp fine detail, "
+		"high frequency texture, small scale pattern");
+
+	int32 Failures = 0;
+	const auto Check = [&Failures](const FString& Label, bool bOk, const FString& Detail)
+	{
+		if (!bOk)
+		{
+			++Failures;
+		}
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s %-46s %s"),
+			bOk ? TEXT("✓") : TEXT("✗"), *Label, *Detail);
+	};
+
+	// ---- 用例 1：完整模板能拆出骨架，且拼回去与原串一致 ----
+	{
+		const ComfyPrompt::FComfyPromptScaffold S = ComfyPrompt::Split(Template);
+		Check(TEXT("① 完整模板拆出骨架"),
+			S.HasScaffold() && S.Prefix.Contains(TEXT("mtrlx"))
+				&& S.Suffix.Contains(TEXT("raking light")),
+			FString::Printf(TEXT("前缀[%s] 后缀[%s]"), *S.Prefix, *S.Suffix.Left(40)));
+
+		Check(TEXT("① 拆分可逆（Join 回原串）"),
+			ComfyPrompt::Join(S.Prefix, S.Description, S.Suffix) == Template,
+			TEXT(""));
+	}
+
+	// ---- 用例 2（★ 复现原 bug）：把描述全选删掉、再重打 ----
+	// 原实现在「清空」这一步就把骨架弄丢了，之后输入什么都救不回来。
+	{
+		ComfyPrompt::FComfyPromptEditor Editor;
+		Editor.ResetFromPrompt(Template);
+
+		Editor.SetDescription(TEXT(""));                       // 全选删除的中间态
+		Editor.SetDescription(TEXT("coarse pebbly sand"));      // 重新输入
+
+		const FString Full = Editor.GetFullPrompt();
+		Check(TEXT("② 清空再重打后骨架仍在（★原 bug）"),
+			Full.Contains(TEXT("mtrlx")) && Full.Contains(TEXT("raking light")),
+			FString::Printf(TEXT("%d 字"), Full.Len()));
+		Check(TEXT("② 描述已换成新内容"),
+			Editor.GetDescription() == TEXT("coarse pebbly sand"),
+			*Editor.GetDescription());
+	}
+
+	// ---- 用例 3（★ 反面对照）：直接对裸描述做 Split 会返回空骨架 ----
+	// 这条不是测实现，而是把"为什么必须缓存骨架"钉在测试里：
+	// 启发式在缺少描述时会退化，所以任何"每次重新推导"的写法都必然出事。
+	{
+		const ComfyPrompt::FComfyPromptScaffold S = ComfyPrompt::Split(TEXT("coarse pebbly sand"));
+		Check(TEXT("③ 裸描述拆不出骨架（启发式的固有行为）"),
+			!S.HasScaffold(),
+			FString::Printf(TEXT("前缀空=%d 后缀空=%d"), S.Prefix.IsEmpty(), S.Suffix.IsEmpty()));
+	}
+
+	// ---- 用例 4：折叠区里把整条改成裸描述，骨架不许被抹掉 ----
+	{
+		ComfyPrompt::FComfyPromptEditor Editor;
+		Editor.ResetFromPrompt(Template);
+
+		const bool bUpdated = Editor.SetFullPrompt(TEXT("smooth polished marble"));
+		const FString Full = Editor.GetFullPrompt();
+
+		Check(TEXT("④ 折叠区改成裸描述：不更新骨架"),
+			!bUpdated,
+			TEXT(""));
+		Check(TEXT("④ 折叠区改成裸描述：原骨架保留"),
+			Full.Contains(TEXT("mtrlx")) && Full.Contains(TEXT("raking light")),
+			*Full.Left(60));
+	}
+
+	// ---- 用例 5：折叠区里连骨架一起改，应当被接受 ----
+	{
+		ComfyPrompt::FComfyPromptEditor Editor;
+		Editor.ResetFromPrompt(Template);
+
+		const FString NewFull = TEXT("mtrlx, seamless tileable PBR material, polished marble, "
+			TEXT("raking light, crisp fine detail"));
+		const bool bUpdated = Editor.SetFullPrompt(NewFull);
+
+		Check(TEXT("⑤ 折叠区改骨架：更新成功且可逆"),
+			bUpdated && Editor.GetFullPrompt() == NewFull,
+			*Editor.GetFullPrompt());
+	}
+
+	// ---- 用例 6：提交用的完整提示词永远含骨架（这是出图质量的直接保证）----
+	{
+		ComfyPrompt::FComfyPromptEditor Editor;
+		Editor.ResetFromPrompt(Template);
+		Editor.SetDescription(TEXT("wet dark pebbles"));
+
+		// 关键 token 一个都不能少：mtrlx 是 LoRA 触发词，
+		// raking light / crisp fine detail 决定基础贴图带不带几何线索。
+		const FString Full = Editor.Compose();
+		Check(TEXT("⑥ 提交文本含 LoRA 触发词"),
+			Full.Contains(TEXT("mtrlx")), TEXT(""));
+		Check(TEXT("⑥ 提交文本含光照/细节 tag（阶段B 反演法线靠它）"),
+			Full.Contains(TEXT("raking light")) && Full.Contains(TEXT("crisp fine detail")),
+			*Full.Left(80));
+		Check(TEXT("⑥ 骨架状态报告为正常"),
+			Editor.HasScaffold() && Editor.GetWarning().IsEmpty(),
+			*Editor.GetWarning());
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	if (Failures > 0)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("  ✗ %d 个用例不符 —— 提示词骨架可能在编辑描述时被丢弃"), Failures);
+		return 1;
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  编辑描述（含清空重打）后骨架仍在，且提交文本始终含光照/细节 tag"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
 	return 0;
@@ -431,6 +573,12 @@ int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
 	if (FParse::Param(*CmdLine, TEXT("TestSamplerTypeCheck")))
 	{
 		return RunSamplerTypeCheck();
+	}
+
+	// -TestPromptScaffold：提示词骨架编辑模型的负向回归（不连 ComfyUI、不需要资产）
+	if (FParse::Param(*CmdLine, TEXT("TestPromptScaffold")))
+	{
+		return RunPromptScaffoldTest();
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ ComfyTextureStudio · M1 无 UI 全链路 ════"));
