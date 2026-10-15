@@ -1,11 +1,14 @@
 #include "ComfyTextureStudioCommandlet.h"
 
 #include "ComfyImportTypes.h"
+#include "ComfyPaths.h"
+#include "ComfyPreviewFocus.h"    // -TestPreviewFocus：预览焦点/历史候选模型的负向回归
 #include "ComfyPromptScaffold.h"
 #include "ComfySamplerType.h"
 #include "ComfyTextureJob.h"
 #include "ComfyTextureStudio.h"
 #include "ComfyTextureStudioSettings.h"
+#include "ComfyWorkflowGraph.h"   // FComfyStageSpec / LoadManifest（-TestWorkflowPaths 用）
 #include "Engine/Texture2D.h"
 #include "HttpManager.h"      // FHttpManager 的完整定义（HttpModule.h 只有前置声明）
 #include "HttpModule.h"
@@ -52,6 +55,8 @@ void UComfyTextureStudioCommandlet::PrintUsage()
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestLiveness            复现「请求飞行中销毁客户端」的时序，验证存活令牌"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestSamplerTypeCheck    负向验证 SamplerType 校验器（不需要 ComfyUI）"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestPromptScaffold      负向验证提示词骨架不会因编辑描述而丢失（不需要 ComfyUI）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestWorkflowPaths       验证 manifest/Settings 引用的工作流文件都能解析到（不需要 ComfyUI）"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -TestPreviewFocus        负向验证预览会跟随新产物、钉住时不抢、阶段B 输入与所见一致（不需要 ComfyUI）"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  -CtsTestPanel            编辑器启动时组装一次面板并销毁（需 Slate）"));
 }
 
@@ -332,6 +337,19 @@ static int32 RunPromptScaffoldTest()
 			*Editor.GetWarning());
 	}
 
+	// ---- 用例 7（★2026-10-14 的教训）：没载入模板时必须有明确警告 ----
+	// 面板曾因为工作流文件路径解析失败而压根没调到 ResetFromPrompt，
+	// 那时 GetWarning() 返回空串，面板上显示成 `骨架缺失（）` —— 等于没提示。
+	{
+		const ComfyPrompt::FComfyPromptEditor Editor;   // 默认构造 = 未初始化
+		Check(TEXT("⑦ 未初始化时 HasScaffold 为假"),
+			!Editor.HasScaffold(),
+			TEXT(""));
+		Check(TEXT("⑦ 未初始化时警告非空（★面板据此提示）"),
+			!Editor.GetWarning().IsEmpty(),
+			*Editor.GetWarning());
+	}
+
 	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
 	if (Failures > 0)
 	{
@@ -341,6 +359,289 @@ static int32 RunPromptScaffoldTest()
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  编辑描述（含清空重打）后骨架仍在，且提交文本始终含光照/细节 tag"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	return 0;
+}
+
+/**
+ * 预览焦点模型的负向回归测试（`-TestPreviewFocus`）。
+ *
+ * 起因（2026-10-14）：用户报「新生成的贴图不出现在右栏预览，还是旧图，历史也没有」。
+ * 两条独立的缺陷：
+ *   1. `OnActiveTimer` 里写的是 `if (FocusedPreviewPath.IsEmpty()) FocusedPreviewPath = 新路径;`
+ *      —— 只有第一次出产物时为真，之后每次重新生成预览都停在第一张。
+ *      这个错误在 UI 上**看不出是错的**：有图、有缩略图，只是那张图是旧的。
+ *   2. 历史候选列表是个写死的单槽 `#1`，`StageAHistory` 一直在维护却从没被渲染。
+ *
+ * 纯内存、不依赖 Slate、不连 ComfyUI —— 状态迁移是纯逻辑，就该这样测。
+ */
+static int32 RunPreviewFocusTest()
+{
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ 预览焦点 / 历史候选模型 · 负向回归 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+
+	int32 Failures = 0;
+	const auto Check = [&Failures](const FString& Label, bool bOk, const FString& Detail)
+	{
+		if (!bOk)
+		{
+			++Failures;
+		}
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s %-52s %s"),
+			bOk ? TEXT("✓") : TEXT("✗"), *Label, *Detail);
+	};
+
+	// 日志里只印文件名看不出差别（每个任务目录里都叫 stage_a_base_00001_.png），
+	// 所以带上上一级目录 —— 否则"第二次接管了吗"这条证据等于没印。
+	const auto ShortPath = [](const FString& P)
+	{
+		return FPaths::GetCleanFilename(FPaths::GetPath(P)) / FPaths::GetCleanFilename(P);
+	};
+
+	// ---- 用例 1（★ 复现原 bug）：第二次产物必须把预览带过去 ----
+	{
+		ComfyPreview::FStageAHistory H;
+		const FString A = TEXT("C:/cache/job1/stage_a/stage_a_base_00001_.png");
+		const FString B = TEXT("C:/cache/job2/stage_a/stage_a_base_00001_.png");
+
+		H.Remember(A);
+		H.FollowNewResult(A);
+		const bool bFirstOk = (H.GetFocused() == A);
+
+		H.Remember(B);
+		const bool bFollowed = H.FollowNewResult(B);
+
+		Check(TEXT("① 第一次产物接管焦点"), bFirstOk, ShortPath(H.GetFocused()));
+		Check(TEXT("① 第二次产物也接管焦点（★原 bug：旧实现停在第一张）"),
+			bFollowed && H.GetFocused() == B,
+			FString::Printf(TEXT("焦点=%s"), *ShortPath(H.GetFocused())));
+	}
+
+	// ---- 用例 2：历史候选最新在前、去重、封顶 ----
+	{
+		ComfyPreview::FStageAHistory H;
+		for (int32 i = 1; i <= 12; ++i)
+		{
+			H.Remember(FString::Printf(TEXT("C:/cache/job%d/a.png"), i));
+		}
+
+		Check(TEXT("② 封顶 MaxEntries"),
+			H.Num() == ComfyPreview::FStageAHistory::MaxEntries,
+			FString::Printf(TEXT("%d 项"), H.Num()));
+		Check(TEXT("② 最新在前（#1 是最后生成的）"),
+			H.At(0).Contains(TEXT("job12")),
+			FPaths::GetCleanFilename(H.At(0)));
+		Check(TEXT("② 丢的是最老的（job5 起还在，job4 已丢）"),
+			H.At(H.Num() - 1).Contains(TEXT("job5")) && !H.Contains(TEXT("C:/cache/job4/a.png")),
+			FPaths::GetCleanFilename(H.At(H.Num() - 1)));
+
+		// 重复记入：不增加条目，但要把它提到最前（"#1 = 最新"这条 UI 约定靠它成立）
+		H.Remember(TEXT("C:/cache/job9/a.png"));
+		Check(TEXT("② 重复记入不增加条目"),
+			H.Num() == ComfyPreview::FStageAHistory::MaxEntries, FString::Printf(TEXT("%d 项"), H.Num()));
+		Check(TEXT("② 重复记入会提到最前"),
+			H.IndexOf(TEXT("C:/cache/job9/a.png")) == 0,
+			FString::Printf(TEXT("index=%d"), H.IndexOf(TEXT("C:/cache/job9/a.png"))));
+
+		// 负向：空路径不该污染列表
+		const int32 Before = H.Num();
+		H.Remember(FString());
+		Check(TEXT("② 空路径不记入（负向）"), H.Num() == Before, TEXT(""));
+	}
+
+	// ---- 用例 3：用户钉住之后，新结果不许抢焦点 ----
+	{
+		ComfyPreview::FStageAHistory H;
+		H.Remember(TEXT("C:/cache/job1/a.png"));
+		H.Remember(TEXT("C:/cache/job2/a.png"));
+
+		Check(TEXT("③ 点历史候选会钉住"), H.FocusCandidate(1), FPaths::GetCleanFilename(H.GetFocused()));
+		const FString Pinned = H.GetFocused();
+
+		const bool bStolen = H.FollowNewResult(TEXT("C:/cache/job3/a.png"));
+		Check(TEXT("③ 钉住后新结果不抢焦点"),
+			!bStolen && H.GetFocused() == Pinned,
+			FString::Printf(TEXT("焦点仍=%s"), *FPaths::GetCleanFilename(H.GetFocused())));
+
+		// 新一轮开始 ⇒ 解除钉住，恢复跟随
+		H.Unpin();
+		const bool bFollowed = H.FollowNewResult(TEXT("C:/cache/job3/a.png"));
+		Check(TEXT("③ Unpin 后恢复跟随"),
+			bFollowed && H.GetFocused().Contains(TEXT("job3")),
+			FPaths::GetCleanFilename(H.GetFocused()));
+
+		// 负向：越界下标
+		Check(TEXT("③ 越界焦点请求被拒（负向）"),
+			!H.FocusCandidate(99) && !H.FocusCandidate(-1), TEXT(""));
+		Check(TEXT("③ 越界读取返回空串（不是 UB）（负向）"),
+			H.At(99).IsEmpty(), TEXT(""));
+	}
+
+	// ---- 用例 4：阶段B 输入必须与"用户看到的那张"一致 ----
+	{
+		ComfyPreview::FStageAHistory H;
+		const FString Older = TEXT("C:/cache/job1/stage_a/a.png");
+		const FString Latest = TEXT("C:/cache/job2/stage_a/a.png");
+		const FString Alb = TEXT("C:/cache/job2/stage_b/albedo_00001_.png");
+
+		H.Remember(Older);
+		H.Remember(Latest);
+
+		// 焦点 = 本次产物 ⇒ 不覆盖（Job 用默认值即可）
+		H.Focus(Latest, false);
+		Check(TEXT("④ 焦点=本次产物 ⇒ 不覆盖"),
+			H.ResolveStageBInput(Latest).IsEmpty(), TEXT(""));
+
+		// 焦点 = 更早的历史候选 ⇒ 覆盖，否则 UI 显示 A、实际拿 B 反演
+		H.Focus(Older, true);
+		Check(TEXT("④ 焦点=历史候选 ⇒ 覆盖为该候选"),
+			H.ResolveStageBInput(Latest) == Older, ShortPath(Older));
+
+		// 负向：焦点是阶段B 产物（不在历史里）⇒ 不覆盖，
+		// 否则再点一次「生成 PBR 全套」就会拿 albedo 二次反演
+		H.Focus(Alb, false);
+		Check(TEXT("④ 焦点=阶段B 产物 ⇒ 不覆盖（防止 albedo 二次反演）（负向）"),
+			H.ResolveStageBInput(Latest).IsEmpty(), ShortPath(Alb));
+
+		// 负向：没有焦点
+		H.ClearFocus();
+		Check(TEXT("④ 焦点为空 ⇒ 不覆盖（负向）"),
+			H.ResolveStageBInput(Latest).IsEmpty() && H.GetFocused().IsEmpty(), TEXT(""));
+	}
+
+	if (Failures > 0)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("  ✗ %d 个用例不符 —— 右栏预览可能又停在旧图上"), Failures);
+		return 1;
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  新产物接管焦点；钉住时不抢；阶段B 输入与所见一致"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	return 0;
+}
+
+/**
+ * 工作流文件路径可达性自检（`-TestWorkflowPaths`）。
+ *
+ * 起因（2026-10-14）：manifest 的 `stages.stageA.apiWorkflowFile` 只写了文件名
+ * （`stage_a_base_texture.json`），而它被直接拼到插件根 —— 那个路径不存在。
+ * 后果不是"报个错"，而是**面板从来没拿到过正向提示词模板**：骨架一直是空的，
+ * 用户一编辑描述框，完整模板就被一条裸描述顶掉，出图缺光照与几何线索，
+ * 阶段B 的法线几乎全平（实测 normal 0.0161 vs 正常 0.1803）。
+ *
+ * 它能潜伏这么久有两个原因，都值得记下来：
+ *   1. 只有**面板**读提示词走 `apiWorkflowFile`；commandlet 与 Job 走的是
+ *      Settings 里带完整目录的 `StageAWorkflowFile`，一路正常 ⇒ 端到端跑得通。
+ *   2. Job 注入槽位时对空值**跳过覆盖**，于是面板给不出提示词时用的是 manifest
+ *      默认值 —— 看起来也对。只有用户编辑了描述框，裸描述才会顶掉模板。
+ *
+ * 这个测试就是补那个缺口：把配置里引用的每个工作流文件都解析一遍并断言存在。
+ * 纯文件系统，不需要 ComfyUI、不需要资产。
+ */
+static int32 RunWorkflowPathCheck()
+{
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ 工作流文件路径可达性 · 自检 ════"));
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+
+	int32 Failures = 0;
+	const auto Check = [&Failures](const FString& Label, bool bOk, const FString& Detail)
+	{
+		if (!bOk)
+		{
+			++Failures;
+		}
+		UE_LOG(LogComfyTextureStudio, Log, TEXT("  %s %-46s %s"),
+			bOk ? TEXT("✓") : TEXT("✗"), *Label, *Detail);
+	};
+
+	const UComfyTextureStudioSettings* Settings = GetDefault<UComfyTextureStudioSettings>();
+	if (Settings == nullptr)
+	{
+		UE_LOG(LogComfyTextureStudio, Error, TEXT("  ✗ 读不到插件设置"));
+		return 1;
+	}
+
+	// ---- ① manifest 本身 ----
+	const FString ManifestPath = ComfyPaths::ResolvePluginPath(Settings->WorkflowManifestFile);
+	Check(TEXT("① manifest 存在"), ComfyPaths::FileExists(ManifestPath), ManifestPath);
+
+	TMap<FString, FComfyStageSpec> Stages;
+	FString Error;
+	if (!FComfyWorkflowGraph::LoadManifest(ManifestPath, Stages, Error))
+	{
+		UE_LOG(LogComfyTextureStudio, Error, TEXT("  ✗ 装载 manifest 失败：%s"), *Error);
+		return 1;
+	}
+	Check(TEXT("① manifest 可装载"), true,
+		FString::Printf(TEXT("%d 个阶段"), Stages.Num()));
+
+	// ---- ② / ③ manifest 里每个阶段引用的工作流文件 ----
+	// 这一项就是 2026-10-14 漏掉的那个：面板读提示词走的正是这条路径。
+	for (const TPair<FString, FComfyStageSpec>& Pair : Stages)
+	{
+		const FString& StageName = Pair.Key;
+		const FComfyStageSpec& Spec = Pair.Value;
+
+		const FString Resolved = ComfyPaths::ResolveWorkflowFile(Spec.ApiWorkflowFile, ManifestPath);
+		Check(FString::Printf(TEXT("② manifest.%s.apiWorkflowFile 可解析"), *StageName),
+			!Resolved.IsEmpty(),
+			Resolved.IsEmpty()
+				? FString::Printf(TEXT("原始值「%s」三个基准都没找到"), *Spec.ApiWorkflowFile)
+				: Resolved);
+
+		if (!Resolved.IsEmpty())
+		{
+			// 再确认它真能当工作流装载 —— 存在但格式坏了同样是配置错误
+			FComfyWorkflowGraph Graph;
+			FString LoadError;
+			Check(FString::Printf(TEXT("② manifest.%s 工作流可装载"), *StageName),
+				Graph.LoadFromFile(Resolved, Spec, LoadError), LoadError);
+		}
+	}
+
+	// ---- ④ / ⑤ Settings 里的工作流路径（commandlet 与 Job 走这条）----
+	{
+		const FString A = ComfyPaths::ResolvePluginPath(Settings->StageAWorkflowFile);
+		Check(TEXT("④ Settings.StageAWorkflowFile 存在"),
+			ComfyPaths::FileExists(A), A);
+
+		const FString B = ComfyPaths::ResolvePluginPath(Settings->StageBWorkflowFile);
+		Check(TEXT("⑤ Settings.StageBWorkflowFile 存在"),
+			ComfyPaths::FileExists(B), B);
+	}
+
+	// ---- ⑥ 负向：不存在的文件必须返回空串，不能返回"看起来像路径"的死路径 ----
+	// 返回死路径的话，上游拿到非空字符串就会把"配置错了"当成"设置好了"。
+	{
+		const FString Missing = ComfyPaths::ResolveWorkflowFile(
+			TEXT("definitely_not_a_real_workflow.json"), ManifestPath);
+		Check(TEXT("⑥ 不存在的文件返回空串（★负向）"),
+			Missing.IsEmpty(),
+			Missing.IsEmpty() ? TEXT("空串，调用方必须报错") : FString::Printf(TEXT("返回了「%s」"), *Missing));
+	}
+
+	// ---- ⑦ 兼容：字段只写文件名时，也要能解析到（与 manifest 同目录）----
+	// 这样即使将来有人把 apiWorkflowFile 写成裸文件名，也不会重演本次事故。
+	{
+		const FString Bare = ComfyPaths::ResolveWorkflowFile(
+			TEXT("stage_a_base_texture.json"), ManifestPath);
+		Check(TEXT("⑦ 裸文件名写法仍可解析（兼容）"),
+			!Bare.IsEmpty() && ComfyPaths::FileExists(Bare),
+			Bare.IsEmpty() ? TEXT("解析失败 —— 兼容基准没生效") : Bare);
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
+	if (Failures > 0)
+	{
+		UE_LOG(LogComfyTextureStudio, Error,
+			TEXT("  ✗ %d 项不符 —— 有工作流文件解析不到，面板会拿不到提示词模板"), Failures);
+		return 1;
+	}
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("  配置里引用的工作流文件全部可达，且失败时返回空串而不是死路径"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("  测试通过"));
 	UE_LOG(LogComfyTextureStudio, Log, TEXT(""));
 	return 0;
@@ -579,6 +880,18 @@ int32 UComfyTextureStudioCommandlet::Main(const FString& Params)
 	if (FParse::Param(*CmdLine, TEXT("TestPromptScaffold")))
 	{
 		return RunPromptScaffoldTest();
+	}
+
+	// -TestWorkflowPaths：配置里引用的工作流文件是否都解析得到（不连 ComfyUI、不需要资产）
+	if (FParse::Param(*CmdLine, TEXT("TestWorkflowPaths")))
+	{
+		return RunWorkflowPathCheck();
+	}
+
+	// -TestPreviewFocus：预览焦点/历史候选模型的负向回归（不连 ComfyUI、不需要资产）
+	if (FParse::Param(*CmdLine, TEXT("TestPreviewFocus")))
+	{
+		return RunPreviewFocusTest();
 	}
 
 	UE_LOG(LogComfyTextureStudio, Log, TEXT("════ ComfyTextureStudio · M1 无 UI 全链路 ════"));

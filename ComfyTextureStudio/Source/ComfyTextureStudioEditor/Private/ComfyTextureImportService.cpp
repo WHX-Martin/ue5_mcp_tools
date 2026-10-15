@@ -4,6 +4,7 @@
 #include "AssetToolsModule.h"
 #include "AssetImportTask.h"
 #include "ComfyMaterialBuilder.h"
+#include "ComfyPaths.h"        // 路径解析的唯一实现
 #include "ComfySamplerType.h"   // SamplerType ↔ 贴图压缩格式的一致性核对
 #include "ComfyTextureStudioEditor.h"
 #include "ComfyTextureStudioSettings.h"
@@ -11,7 +12,6 @@
 #include "Engine/TextureDefines.h"
 #include "Factories/TextureFactory.h"
 #include "HAL/FileManager.h"
-#include "Interfaces/IPluginManager.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionBumpOffset.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
@@ -28,18 +28,8 @@
 
 FString FComfyTextureImportService::ResolvePluginPath(const FString& MaybeRelative)
 {
-	if (MaybeRelative.IsEmpty())
-	{
-		return MaybeRelative;
-	}
-	if (FPaths::IsRelative(MaybeRelative) && !MaybeRelative.StartsWith(TEXT("/")))
-	{
-		if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("ComfyTextureStudio")))
-		{
-			return FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir() / MaybeRelative);
-		}
-	}
-	return FPaths::ConvertRelativePathToFull(MaybeRelative);
+	// 委托给 ComfyPaths —— 这里曾有一份自己的实现（与 FComfyTextureJob 的那份重复）
+	return ComfyPaths::ResolvePluginPath(MaybeRelative);
 }
 
 bool FComfyTextureImportService::LoadStageBSpecs(

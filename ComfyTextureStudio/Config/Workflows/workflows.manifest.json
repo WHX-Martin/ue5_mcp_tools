@@ -404,7 +404,7 @@
           }
         }
       },
-      "apiWorkflowFile": "stage_a_base_texture.json",
+      "apiWorkflowFile": "Config/Workflows/stage_a_base_texture.json",
       "apiNodeCount": 9
     },
     "stageB": {
@@ -915,7 +915,7 @@
           }
         }
       },
-      "apiWorkflowFile": "stage_b_pbr.json",
+      "apiWorkflowFile": "Config/Workflows/stage_b_pbr.json",
       "inputPlaceholder": "__CTS_RUNTIME_INPUT__.png",
       "apiNodeCount": 15
     }

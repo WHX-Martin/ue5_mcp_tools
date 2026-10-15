@@ -25,6 +25,7 @@
 | [`docs/M2-report.md`](docs/M2-report.md) | **M2 报告**：面板 + 导入 + 材质；三层验证结果、2 个自引入 bug（含一个崩溃）、未验证项清单 |
 | [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md) | **M2.1 补丁**：SamplerType 编译失败的三条根因（规范写错 / 自检盲区 / 编译假绿灯）、修复与负向回归测试 |
 | [`docs/M2.3-prompt-scaffold-and-viewer.md`](docs/M2.3-prompt-scaffold-and-viewer.md) | **M2.3 补丁**：「PBR 与基础色对不上」的根因链（提示词骨架被静默丢弃 + 采样器被探测改掉）、预览窗口打不开的根因、排查方法论 |
+| [`docs/M2.4-preview-follow-and-history.md`](docs/M2.4-preview-follow-and-history.md) | **M2.4 补丁**：右栏预览停在旧图的三处根因（条件赋值 / 构造期按值捕获 / 数据有而 UI 没有）、阶段B 输入与所见一致性、教训清单 |
 | [`Config/Workflows/workflows.manifest.json`](Config/Workflows/workflows.manifest.json) | 语义槽位映射（机器可读），C++ 侧按语义键读写，**不硬编码节点 id** |
 | **[`Resources/README.md`](Resources/README.md)** | **节点包纳管说明** · 依赖链 · 安装与同步流程 |
 
@@ -141,6 +142,7 @@ curl -skL -m 900 \
 - [x] **M2.1**：修复 SamplerType 与贴图压缩格式不符（材质在编辑器里编译报红字）+ 揭穿"编译 0 错误"假绿灯
 - [x] **M2.2**：图片查看器 —— 面板里所有图点击即弹独立窗口（滚轮缩放 / 拖拽平移 / 2×2 平铺 / 转系统看图器）
 - [x] **M2.3**：修复提示词骨架在编辑描述时被静默丢弃（出图失几何线索 → 法线几乎全平）+ 采样器默认值被探测覆盖 + 预览窗口依赖已清理的 PNG
+- [x] **M2.4**：修复右栏预览不跟随新产物（焦点写成"只在空时赋值"）+ 「历史候选」从未渲染 + 阶段B 可能吃到与所见不一致的那张图
 - [ ] **M3**：WebSocket 进度 / 取消过渡态 / 参数预设 / 资产浏览器右键入口
 - [ ] **M4**：批量候选 / 任意图→PBR / Nanite 位移 / Upscale 接入
 
@@ -161,16 +163,29 @@ curl -skL -m 900 \
 **M2.1 实测结论：SamplerType 自检 4/4、冷加载核对 41 项 0 项不符、负向回归 8/8。**
 详见 [`docs/M2.1-sampler-fix.md`](docs/M2.1-sampler-fix.md)。
 
-**M2.3 实测结论：提示词骨架负向回归 13/13、冷加载核对 41 项 0 项不符。**
-端到端复跑对比用户出问题那次 —— 法线强度 0.0191 → **0.1620**、高度图对比度 15.04 → **30.84**，
-差距只来自阶段A 的提示词是否带骨架（LoRA 触发词 + 光照/细节 tag）。
-详见 [`docs/M2.3-prompt-scaffold-and-viewer.md`](docs/M2.3-prompt-scaffold-and-viewer.md)。
+**M2.3 实测结论：提示词骨架负向回归 13/13、路径自检 9/9、冷加载核对 41 项 0 项不符。**
+端到端 295 字完整提示词 → normal **0.1674**、高度图 std **31.17**（正常区间）；
+同一套阶段B 参数喂一条裸描述则是 0.0161 / 13.61 —— 差 10 倍，只因为提示词丢了骨架。
+详见 [`docs/M2.3-prompt-scaffold-and-viewer.md`](docs/M2.3-prompt-scaffold-and-viewer.md)
+（含续篇：真正的根因在更上游 —— manifest 的工作流路径解析不到，
+面板因此**从来没载入过**提示词模板）。
 
 > ⚠️ **提示词骨架不要动。** 描述框只替换「材质描述」那一段，前后固定 tag
 > （`mtrlx` 触发词、`directional sunlight` / `raking light` / `crisp fine detail`）
 > 由 `ComfyPrompt::FComfyPromptEditor` 持有，改描述不会影响它们。
 > 这不是装饰：**阶段B 的 DSINE 靠明暗反推几何**，丢了这些 tag 基础色就没有几何线索，
 > 法线会几乎全平 —— 看起来就是「PBR 和基础色对不上」。
+>
+> 面板上如果出现**红色告警条**说"提示词骨架/装载有问题"，别忽略：
+> 那意味着出图会缺光照线索。跑 `-TestWorkflowPaths` 查配置。
+
+**M2.4 实测结论：预览焦点负向回归 17/17、其余自检 13/13 · 9/9 · 8/8、冷加载核对 41 项 0 项不符。**
+端到端复跑正常（normal **0.1652**、height std **31.36**）。
+详见 [`docs/M2.4-preview-follow-and-history.md`](docs/M2.4-preview-follow-and-history.md)。
+
+> 右栏预览的两条规矩（都写在 `ComfyPreview::FStageAHistory` 里，别改回面板）：
+> **① 新产物一律接管焦点**（只有用户点了某个历史候选才会"钉住"不被抢）；
+> **② 「✓ 用这张继续」用的是右栏正在显示的那张**，不是"本次最新的那张"。
 
 > ⚠️ **M2 的 UI 部分只做到"编译通过 + 逻辑接线"**：当前沙箱无法创建 GUI 窗口，
 > 无头环境下 Slate 未初始化（面板自检会优雅跳过）。面板的视觉与交互需要人工确认，
@@ -230,6 +245,18 @@ MSYS_NO_PATHCONV=1 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.
 :: 断言「把描述全选删掉再重打」之后骨架仍在 —— 2026-10-13 那次出图不对就是这里丢的
 "<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
   -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestPromptScaffold
+
+:: 工作流文件路径可达性自检（**不需要 ComfyUI，也不需要任何资产**）
+:: 逐项解析 manifest / Settings 里引用的工作流文件并断言存在。
+:: 2026-10-14 那次「面板拿不到提示词模板」就是这里漏掉了 —— 配这个测试就不会再有下次
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestWorkflowPaths
+
+:: 预览焦点 / 历史候选模型的负向回归（**不需要 ComfyUI，也不需要任何资产**）
+:: 断言「第二次产物也要接管焦点」（旧实现停在第一张）、「钉住后新结果不抢焦点」、
+:: 「阶段B 的输入与右栏所见一致」（焦点是 albedo 时不许覆盖，防止二次反演）
+"<UE_5.8>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<...>.uproject" ^
+  -run=ComfyTextureStudio -unattended -nopause -nosplash -stdout -TestPreviewFocus
 ```
 
 产物落在 `<宿主工程>/Saved/ComfyTextureStudio/Cache/<JobId>/`，含 `stage_a/`、`stage_b/`、

@@ -2,6 +2,7 @@
 
 #include "Brushes/SlateDynamicImageBrush.h"
 #include "ComfyAssetNaming.h"
+#include "ComfyPaths.h"
 #include "ComfyPreviewTexture.h"
 #include "ComfyTextureImportService.h"
 #include "ComfyTextureStudioEditor.h"
@@ -51,6 +52,9 @@ namespace
 
 	FSlateFontInfo SmallFont() { return FCoreStyle::GetDefaultFontStyle("Regular", 9); }
 	FSlateFontInfo BoldFont()  { return FCoreStyle::GetDefaultFontStyle("Bold", 9); }
+
+	/** 预览资源缓存上限。见 TrimPreviewCache()：只淘汰文件还在磁盘上的条目。 */
+	constexpr int32 MaxPreviewCache = 24;
 
 	/** 参数行：固定宽度的标签 + 内容。 */
 	FSlateFontInfo SectionFont() { return FCoreStyle::GetDefaultFontStyle("Bold", 11); }
@@ -143,9 +147,27 @@ void SComfyTextureStudioPanel::Construct(const FArguments& InArgs)
 		{
 			if (const FComfyStageSpec* StageA = Stages.Find(TEXT("stageA")))
 			{
+				// 工作流文件的位置必须用 ResolveWorkflowFile 解析，**不能把字段直接
+				// 拼到插件根**：manifest 里这个字段只写了文件名（`stage_a_base_texture.json`）
+				// 时，拼出来的路径是不存在的，而"读不到"在这里的后果不是简单报错 ——
+				// 是**提示词模板为空**。骨架空着，用户一编辑描述框，完整模板就被一条
+				// 裸描述顶掉，出图没有光照/几何线索，阶段B 的法线几乎全平。
+				// 2026-10-14 用户报的"极端问题"就是这个（潜伏自 M2）。
 				FComfyWorkflowGraph Graph;
-				const FString GraphPath = FComfyTextureImportService::ResolvePluginPath(StageA->ApiWorkflowFile);
-				if (Graph.LoadFromFile(GraphPath, *StageA, Error))
+				const FString GraphPath = ComfyPaths::ResolveWorkflowFile(
+					StageA->ApiWorkflowFile, ManifestPath);
+				if (GraphPath.IsEmpty())
+				{
+					PromptLoadError = FString::Printf(
+						TEXT("找不到阶段A 的工作流文件「%s」"),
+						*StageA->ApiWorkflowFile);
+					UE_LOG(LogComfyTextureStudioEditor, Error,
+						TEXT("%s（manifest 的 stages.stageA.apiWorkflowFile 字段，"
+							"已尝试 插件根 / manifest 同目录 / Config/Workflows 三个基准）。"
+							"提示词模板没载入，出图会缺光照与几何线索。"),
+						*PromptLoadError);
+				}
+				else if (Graph.LoadFromFile(GraphPath, *StageA, Error))
 				{
 					// 骨架在这里**只初始化一次**，之后由 PromptEditor 持有，
 					// 描述框怎么改都不会动它（见 ComfyPromptScaffold.h 的说明）。
@@ -153,11 +175,16 @@ void SComfyTextureStudioPanel::Construct(const FArguments& InArgs)
 					if (Graph.GetSlotValueAsString(TEXT("positive"), Prompt) && !Prompt.IsEmpty())
 					{
 						PromptEditor.ResetFromPrompt(Prompt);
+						UE_LOG(LogComfyTextureStudioEditor, Log,
+							TEXT("提示词模板已载入（%d 字）· 骨架 %s"),
+							Prompt.Len(),
+							PromptEditor.HasScaffold() ? TEXT("完整") : TEXT("缺失"));
 					}
 					else
 					{
-						UE_LOG(LogComfyTextureStudioEditor, Warning,
-							TEXT("读不到 stageA 的 positive 槽位，正向提示词会为空。"));
+						PromptLoadError = TEXT("工作流里读不到 positive 槽位");
+						UE_LOG(LogComfyTextureStudioEditor, Error,
+							TEXT("%s（%s），正向提示词会为空。"), *PromptLoadError, *GraphPath);
 					}
 
 					FString Neg;
@@ -168,8 +195,8 @@ void SComfyTextureStudioPanel::Construct(const FArguments& InArgs)
 				}
 				else
 				{
-					UE_LOG(LogComfyTextureStudioEditor, Warning,
-						TEXT("装载阶段A 工作流失败：%s"), *Error);
+					PromptLoadError = FString::Printf(TEXT("装载阶段A 工作流失败：%s"), *Error);
+					UE_LOG(LogComfyTextureStudioEditor, Error, TEXT("%s"), *PromptLoadError);
 				}
 
 				// 采样器/调度的默认值也来自 manifest。之前这里硬编码，而 ProbeServer
@@ -427,16 +454,22 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildStageASection()
 			"ⓘ 前后固定 tag 来自 LoRA 训练集，改描述不会动它们。完整提示词见下方折叠区。"))
 	];
 
-	// 骨架异常必须可见 —— 没有这行的话，提示词退化成一个裸描述是完全静默的
+	// 提示词相关的问题必须可见 —— 这些失败以前只写在日志里，面板上什么都看不见，
+	// 用户看到的是"出图不对"，完全无从联想（2026-10-14 就是这么被坑的）。
 	{
-		const FString PromptWarning = PromptEditor.GetWarning();
-		if (!PromptWarning.IsEmpty())
+		// 上游原因（文件/路径/槽位）优先；没有才显示骨架本身的问题
+		const FString Problem = !PromptLoadError.IsEmpty()
+			? PromptLoadError
+			: PromptEditor.GetWarning();
+
+		if (!Problem.IsEmpty())
 		{
 			Box->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
 			[
 				MakeNote(FText::Format(
-					LOCTEXT("ScaffoldWarn", "⚠ {0}"),
-					FText::FromString(PromptWarning)), ColorWarn)
+					LOCTEXT("PromptProblem", "⚠ {0}"),
+					FText::FromString(Problem)),
+					PromptLoadError.IsEmpty() ? ColorWarn : ColorErr)
 			];
 		}
 	}
@@ -718,10 +751,13 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildStageASection()
 // 右栏预览
 // --------------------------------------------------------------------------- //
 
-TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(const FString& PngPath, float TileSize)
+TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(float TileSize)
 {
 	// 2×2 平铺自检：把同一张图并排 4 份。四方连续的贴图拼起来不该有可见接缝；
 	// 一旦接缝出现，这里是最容易看出来的地方（比单张盯久了有效）。
+	//
+	// lambda 只捕获 this（**不捕获路径**）：路径每帧从成员里取，
+	// 否则构造期那个空串会被固化进 4 个槽位，平铺区永远空白。
 	TSharedRef<SUniformGridPanel> Grid = SNew(SUniformGridPanel).SlotPadding(FMargin(0));
 	for (int32 i = 0; i < 4; ++i)
 	{
@@ -730,7 +766,7 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(const FString& P
 			SNew(SBox).WidthOverride(TileSize).HeightOverride(TileSize)
 			[
 				SNew(SImage)
-				.Image_Lambda([this, PngPath]() { return GetPreviewBrush(PngPath); })
+				.Image_Lambda([this]() { return GetPreviewBrush(PreviewHistory.GetFocused()); })
 			]
 		];
 	}
@@ -741,9 +777,9 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(const FString& P
 		.ContentPadding(0.0f)
 		.ToolTipText(LOCTEXT("OpenTiledTip",
 			"点击放大查看（直接以 2×2 平铺打开，便于判断四方连续是否有接缝）"))
-		.OnClicked_Lambda([this, PngPath]()
+		.OnClicked_Lambda([this]()
 		{
-			OpenImageViewer(PngPath, TEXT("基础贴图 · 平铺"), /*bStartTiled=*/true);
+			OpenImageViewer(PreviewHistory.GetFocused(), TEXT("基础贴图 · 平铺"), /*bStartTiled=*/true);
 			return FReply::Handled();
 		})
 		[
@@ -751,8 +787,92 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildTiledPreview(const FString& P
 		];
 }
 
+TSharedRef<SWidget> SComfyTextureStudioPanel::BuildHistoryCandidate(int32 Index)
+{
+	// 只捕获**下标**，不捕获路径：历史候选每帧都在变（新的插到头部，
+	// 所有条目的下标都跟着挪），捕获路径就等于把构造期那一瞬间的内容固化成常量。
+	return SNew(SVerticalBox)
+		.Visibility_Lambda([this, Index]()
+		{
+			return PreviewHistory.IsValidIndex(Index) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(SButton)
+			.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+			.ContentPadding(0.0f)
+			.ToolTipText_Lambda([this, Index]()
+			{
+				if (!PreviewHistory.IsValidIndex(Index))
+				{
+					return FText::GetEmpty();
+				}
+				return FText::Format(
+					LOCTEXT("CandidateTip",
+						"#{0} · 单击在右栏查看\n{1}\n（右栏大图可再点开放大 / 2×2 平铺）"),
+					FText::AsNumber(Index + 1),
+					FText::FromString(FPaths::GetCleanFilename(PreviewHistory.At(Index))));
+			})
+			.OnClicked_Lambda([this, Index]()
+			{
+				// 单击 = 把右栏切到这张。**钉住**：之后新到的结果不许抢焦点，
+				// 否则用户正在对比第 2 张时画面会被第 4 张跳走。
+				if (PreviewHistory.FocusCandidate(Index))
+				{
+					UE_LOG(LogComfyTextureStudioEditor, Log,
+						TEXT("预览焦点切到历史候选 #%d：%s（已钉住，新结果不会抢焦点）"),
+						Index + 1, *FPaths::GetCleanFilename(PreviewHistory.GetFocused()));
+				}
+				return FReply::Handled();
+			})
+			[
+				SNew(SBox).WidthOverride(48.0f).HeightOverride(48.0f)
+				[
+					SNew(SImage)
+					.Image_Lambda([this, Index]()
+					{
+						return PreviewHistory.IsValidIndex(Index)
+							? GetPreviewBrush(PreviewHistory.At(Index))
+							: nullptr;
+					})
+				]
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text_Lambda([this, Index]()
+			{
+				if (!PreviewHistory.IsValidIndex(Index))
+				{
+					return FText::GetEmpty();
+				}
+				// 用文字标记当前项而不是加边框：不用去猜引擎里哪个 brush 名可靠，
+				// 也不会给贴图叠一层色偏（判色时那是有害的）。
+				return PreviewHistory.IsCandidateFocused(Index)
+					? FText::Format(LOCTEXT("CandidateFocused", "#{0} ✓当前"), FText::AsNumber(Index + 1))
+					: FText::Format(LOCTEXT("CandidateIndex", "#{0}"), FText::AsNumber(Index + 1));
+			})
+			.Font(SmallFont())
+			.ColorAndOpacity_Lambda([this, Index]()
+			{
+				return PreviewHistory.IsCandidateFocused(Index) ? ColorOk : ColorMuted;
+			})
+		];
+}
+
 TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 {
+	// 历史候选行按「下标」建固定数量的槽位（见 BuildHistoryCandidate 的注释）。
+	TSharedRef<SHorizontalBox> HistoryRow = SNew(SHorizontalBox);
+	for (int32 Index = 0; Index < ComfyPreview::FStageAHistory::MaxEntries; ++Index)
+	{
+		HistoryRow->AddSlot().AutoWidth().Padding(0, 0, 4, 0)
+		[
+			BuildHistoryCandidate(Index)
+		];
+	}
+
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot().AutoHeight().Padding(6, 6, 6, 2)
 		[
@@ -775,20 +895,23 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 						"点击放大查看：滚轮缩放 · 拖拽平移 · 双击复位"))
 					.OnClicked_Lambda([this]()
 					{
-						OpenImageViewer(FocusedPreviewPath, TEXT("基础贴图"));
+						OpenImageViewer(PreviewHistory.GetFocused(), TEXT("基础贴图"));
 						return FReply::Handled();
 					})
 					[
 						SNew(SBox).WidthOverride(150.0f).HeightOverride(150.0f)
 						[
 							SNew(SImage)
-							.Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
+							.Image_Lambda([this]() { return GetPreviewBrush(PreviewHistory.GetFocused()); })
 						]
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 0)
 				[
-					MakeNote(LOCTEXT("OriginalLabel", "原图"))
+					SNew(STextBlock)
+					.Text_Lambda([this]() { return GetFocusedPreviewText(); })
+					.Font(SmallFont())
+					.ColorAndOpacity(ColorMuted)
 				]
 			]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0, 0, 0).VAlign(VAlign_Top)
@@ -796,7 +919,7 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					BuildTiledPreview(FocusedPreviewPath, 75.0f)
+					BuildTiledPreview(75.0f)
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 0)
 				[
@@ -813,46 +936,53 @@ TSharedRef<SWidget> SComfyTextureStudioPanel::BuildPreviewColumn()
 			.ColorAndOpacity(ColorMuted)
 		]
 
-		// 历史候选
+		// 历史候选：PRD §7.2 的 #1~#4，实现最多留 FStageAHistory::MaxEntries 项（最新在前）
 		+ SVerticalBox::Slot().AutoHeight().Padding(6, 4, 6, 2)
 		[
-			SNew(STextBlock).Text(LOCTEXT("HistoryLabel", "历史候选")).Font(SmallFont()).ColorAndOpacity(ColorMuted)
+			SNew(STextBlock)
+			.Text_Lambda([this]()
+			{
+				if (PreviewHistory.Num() == 0)
+				{
+					return LOCTEXT("HistoryLabelEmpty", "历史候选");
+				}
+				return FText::Format(
+					LOCTEXT("HistoryLabelN", "历史候选（{0}）· 单击切换预览焦点"),
+					FText::AsNumber(PreviewHistory.Num()));
+			})
+			.Font(SmallFont())
+			.ColorAndOpacity(ColorMuted)
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(6, 0)
 		[
-			SNew(SBox).MinDesiredHeight(52.0f)
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
 			[
-				SNew(SScrollBox).Orientation(Orient_Horizontal)
-				+ SScrollBox::Slot().Padding(0, 0, 4, 0)
+				SNew(SBox).MinDesiredHeight(52.0f)
+				.Visibility_Lambda([this]()
+				{
+					return PreviewHistory.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
+				})
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth()
+					SNew(SScrollBox).Orientation(Orient_Horizontal)
+					+ SScrollBox::Slot().Padding(0, 0, 4, 0)
 					[
-						SNew(SVerticalBox)
-						+ SVerticalBox::Slot().AutoHeight()
-						[
-							SNew(SButton)
-							.ButtonStyle(FCoreStyle::Get(), "NoBorder")
-							.ContentPadding(0.0f)
-							.ToolTipText(LOCTEXT("OpenCandidateTip", "点击放大查看"))
-							.OnClicked_Lambda([this]()
-							{
-								OpenImageViewer(FocusedPreviewPath, TEXT("基础贴图 · 候选"));
-								return FReply::Handled();
-							})
-							[
-								SNew(SBox).WidthOverride(48.0f).HeightOverride(48.0f)
-								[
-									SNew(SImage).Image_Lambda([this]() { return GetPreviewBrush(FocusedPreviewPath); })
-								]
-							]
-						]
-						+ SVerticalBox::Slot().AutoHeight()
-						[
-							MakeNote(LOCTEXT("Candidate", "#1"))
-						]
+						HistoryRow
 					]
 				]
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("HistoryEmpty",
+					"每次生成（含「换种子重出」）都会留在这里，方便横向对比。"))
+				.Font(SmallFont())
+				.ColorAndOpacity(ColorMuted)
+				.AutoWrapText(true)
+				.Visibility_Lambda([this]()
+				{
+					return PreviewHistory.Num() == 0 ? EVisibility::Visible : EVisibility::Collapsed;
+				})
 			]
 		]
 
@@ -1302,6 +1432,11 @@ void SComfyTextureStudioPanel::StartStageA(bool bNewSeed)
 	LastResult = FComfyJobResult();
 	StatusText.Reset();
 
+	// 新一轮开始 ⇒ 解除"钉住"，新产物到了就让预览跟过去（用户此刻想看的是新的那张）。
+	// 焦点故意**不清**：生成要好几秒，留着上一张比让右栏空着好，
+	// 新的那张一到就会被换掉。
+	PreviewHistory.Unpin();
+
 	Job = MakeUnique<FComfyTextureJob>();
 	JobStartTime = FPlatformTime::Seconds();
 	Job->OnStateChanged = [this](EComfyJobState NewState, const FString& Text)
@@ -1321,7 +1456,33 @@ void SComfyTextureStudioPanel::RequestContinueToStageB()
 	{
 		return;
 	}
-	Job->ContinueToStageB();
+
+	// 「用这张继续」要用**右栏此刻正在显示的那张**。
+	//
+	// Job 默认喂它自己那份阶段A 产物（Result.BaseTexturePath），但用户可以先点历史候选里的
+	// 第 2 张再继续 —— 那就成了「UI 显示 A、实际拿 B 去跑几何反演」，产出的 PBR 与看到的
+	// 对不上，而且完全静默（面板上没有任何东西会因此变色）。这类"同一份数据两个入口行为
+	// 不一致"正是要主动堵掉的。
+	//
+	// 判定规则在 FStageAHistory::ResolveStageBInput 里（含"焦点是阶段B 产物时不许覆盖"
+	// 这条，否则再点一次就会拿 albedo 二次反演），并有 -TestPreviewFocus 守着。
+	const FString JobBaseTexture = Job->GetResult().BaseTexturePath;
+	const FString FeedPath = PreviewHistory.ResolveStageBInput(JobBaseTexture);
+
+	if (FeedPath.IsEmpty())
+	{
+		UE_LOG(LogComfyTextureStudioEditor, Log,
+			TEXT("阶段B 输入用本次阶段A 的产物：%s"),
+			JobBaseTexture.IsEmpty() ? TEXT("(未就绪)") : *FPaths::GetCleanFilename(JobBaseTexture));
+	}
+	else
+	{
+		UE_LOG(LogComfyTextureStudioEditor, Log,
+			TEXT("阶段B 输入改用预览聚焦的那张历史候选：%s"),
+			*FPaths::GetCleanFilename(FeedPath));
+	}
+
+	Job->ContinueToStageB(FeedPath);
 }
 
 void SComfyTextureStudioPanel::RequestCancel()
@@ -1342,9 +1503,11 @@ void SComfyTextureStudioPanel::DiscardStageAResult()
 	ChannelPngPaths.Reset();
 	ImportState = FComfyPanelImportState();
 	LastResult = FComfyJobResult();
-	FocusedPreviewPath.Reset();
+	PreviewHistory.ClearFocus();
 	LastState = EComfyJobState::Idle;
-	StatusText = TEXT("已丢弃阶段 A 的结果。可以改参数重新生成。");
+	// 历史候选**不清**：那张图还在磁盘上，丢掉只是让用户找不回来。
+	// 想恢复就点一下历史里的缩略图。
+	StatusText = TEXT("已丢弃阶段 A 的结果。可以改参数重新生成。（那张图仍留在「历史候选」里，点一下就能找回）");
 }
 
 void SComfyTextureStudioPanel::RequestImport()
@@ -1547,13 +1710,17 @@ void SComfyTextureStudioPanel::OnJobFinished(const FComfyJobResult& InResult)
 		{
 			ChannelPngPaths.Add(Pair.Key, Pair.Value);
 		}
+
+		// 兜底：非向导流程（不暂停）时阶段A 产物没机会走 OnActiveTimer 那条分支
+		PreviewHistory.Remember(InResult.BaseTexturePath);
+
 		if (const FString* Albedo = InResult.ChannelPaths.Find(TEXT("albedo")))
 		{
-			FocusedPreviewPath = *Albedo;
+			PreviewHistory.Focus(*Albedo, /*bPinned=*/false);
 		}
 		else if (!InResult.BaseTexturePath.IsEmpty())
 		{
-			FocusedPreviewPath = InResult.BaseTexturePath;
+			PreviewHistory.Focus(InResult.BaseTexturePath, /*bPinned=*/false);
 		}
 
 		LastState = EComfyJobState::Ready;
@@ -1581,18 +1748,16 @@ EActiveTimerReturnType SComfyTextureStudioPanel::OnActiveTimer(double InCurrentT
 		// 阶段 A 刚下载完的那张图进「历史候选」，顺便把预览切过去
 		if (Job->IsAwaitingStageAReview() && !LastResult.BaseTexturePath.IsEmpty())
 		{
-			if (!StageAHistory.Contains(LastResult.BaseTexturePath))
-			{
-				StageAHistory.Insert(LastResult.BaseTexturePath, 0);
-				while (StageAHistory.Num() > 8)
-				{
-					StageAHistory.Pop();
-				}
-			}
-			if (FocusedPreviewPath.IsEmpty())
-			{
-				FocusedPreviewPath = LastResult.BaseTexturePath;
-			}
+			PreviewHistory.Remember(LastResult.BaseTexturePath);
+
+			// ★ 新结果要**无条件**把预览带过去（除非用户手动钉住了某个候选 —— 那时
+			// 不该把画面抢走）。判定在 FollowNewResult 里。
+			//
+			// 这里以前写的是 `if (FocusedPreviewPath.IsEmpty())` —— 那只在"第一次出产物"
+			// 时成立，之后每次重新生成，右栏都停在第一张。用户 2026-10-14 报的
+			// 「新贴图不会在预览栏显示，仍是旧的图片」就是这个：文件是新的、缓存里也有，
+			// 但焦点路径根本没被改过。回归测试：-TestPreviewFocus。
+			PreviewHistory.FollowNewResult(LastResult.BaseTexturePath);
 		}
 		// 阶段 A 的产物路径在 Job 里是逐步写的，这里同步一份到面板
 		if (!Job->GetResult().BaseTexturePath.IsEmpty())
@@ -1737,7 +1902,7 @@ FText SComfyTextureStudioPanel::GetStageAInfoText() const
 {
 	if (LastResult.BaseTexturePath.IsEmpty())
 	{
-		return LOCTEXT("NoPreview", "尚无预览");
+		return LOCTEXT("NoPreview", "本次尚无产物 · 右栏显示的是上一次的结果");
 	}
 	return FText::Format(LOCTEXT("PreviewInfo", "{0}×{1} · {2} steps · seed {3} · {4}"),
 		FText::AsNumber(Width), FText::AsNumber(Height),
@@ -1829,7 +1994,58 @@ TSharedPtr<FComfyPreviewTexture> SComfyTextureStudioPanel::GetPreviewTexture(con
 
 	TSharedPtr<FComfyPreviewTexture> Loaded = FComfyPreviewTexture::LoadFromPng(PngPath);
 	PreviewCache.Add(PngPath, Loaded);
+	PreviewLoadOrder.Add(PngPath);
+	TrimPreviewCache();
 	return Loaded;
+}
+
+void SComfyTextureStudioPanel::TrimPreviewCache()
+{
+	// 只淘汰「文件仍在磁盘上」的条目。
+	//
+	// **不能无条件按最旧淘汰**：导入完成后 stage_b 的中转 PNG 会被删掉
+	// （Settings::PreserveDownloadedPng 默认 false），那些条目一旦被淘汰就再也加载不回来 ——
+	// 缩略图会变成空白，正是 M2.3 修过的那类故障换个入口重现。
+	// 所以「不可重建」的条目宁可留着占内存。
+	//
+	// Attempts 限一圈，避免"全都不能淘汰"时在这里绕不出来。
+	int32 Attempts = PreviewLoadOrder.Num();
+	while (PreviewCache.Num() > MaxPreviewCache && Attempts-- > 0 && PreviewLoadOrder.Num() > 0)
+	{
+		const FString Oldest = PreviewLoadOrder[0];
+		PreviewLoadOrder.RemoveAt(0);
+
+		if (Oldest == PreviewHistory.GetFocused() || !FPaths::FileExists(Oldest))
+		{
+			PreviewLoadOrder.Add(Oldest);   // 不能淘汰 → 放回队尾，下次再说
+			continue;
+		}
+
+		PreviewCache.Remove(Oldest);
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// 预览焦点
+// --------------------------------------------------------------------------- //
+
+FText SComfyTextureStudioPanel::GetFocusedPreviewText() const
+{
+	const FString& Focused = PreviewHistory.GetFocused();
+	if (Focused.IsEmpty())
+	{
+		return LOCTEXT("NoFocusedPreview", "当前预览：（空）");
+	}
+
+	const FString Name = FPaths::GetCleanFilename(Focused);
+	const int32 HistoryIndex = PreviewHistory.IndexOf(Focused);
+	if (HistoryIndex != INDEX_NONE)
+	{
+		return FText::Format(LOCTEXT("FocusedPreviewCandidate", "当前预览：{0}  ·  阶段A 候选 #{1}"),
+			FText::FromString(Name), FText::AsNumber(HistoryIndex + 1));
+	}
+	return FText::Format(LOCTEXT("FocusedPreviewChannel", "当前预览：{0}  ·  阶段B 产物"),
+		FText::FromString(Name));
 }
 
 const FSlateBrush* SComfyTextureStudioPanel::GetPreviewBrush(const FString& PngPath)
@@ -1844,6 +2060,7 @@ void SComfyTextureStudioPanel::ReleasePreviewTextures()
 	// 不再持有**：如果有查看器窗口还开着，它持有同一份资源的引用，贴图不会被释放
 	// （这正是把缓存从「裸 UTexture2D + 裸 brush」换成它要换来的性质）。
 	PreviewCache.Reset();
+	PreviewLoadOrder.Reset();
 }
 
 void SComfyTextureStudioPanel::OpenImageViewer(const FString& PngPath, const FString& Title, bool bStartTiled)

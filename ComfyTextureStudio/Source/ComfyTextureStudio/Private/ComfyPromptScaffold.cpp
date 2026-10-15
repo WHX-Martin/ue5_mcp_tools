@@ -106,6 +106,7 @@ namespace ComfyPrompt
 	void FComfyPromptEditor::ResetFromPrompt(const FString& InFullPrompt)
 	{
 		FullPrompt = InFullPrompt;
+		bInitialized = true;
 
 		const FComfyPromptScaffold Scaffold = Split(InFullPrompt);
 		Prefix = Scaffold.Prefix;

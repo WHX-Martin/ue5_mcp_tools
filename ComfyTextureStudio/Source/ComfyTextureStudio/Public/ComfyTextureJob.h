@@ -93,8 +93,15 @@ public:
 	 * 处于 StageAReady 时调它继续跑阶段 B。
 	 * 复用已上传的输入（不再重传），并把超时窗口重新计时。
 	 * 状态不对时返回 false。
+	 *
+	 * @param OverrideInputPath 阶段B 要吃的**本地**图片路径（绝对）。
+	 *        空 = 用 Result.BaseTexturePath（本次阶段A 的产物）。
+	 *
+	 *        面板支持从「历史候选」里挑一张继续，所以这里必须能表达"用那张" ——
+	 *        否则 UI 显示第 2 张、实际拿最新那张去反演，产出的 PBR 与看到的对不上，
+	 *        而且面板上没有任何东西会因此变色。默认参数保证既有调用点行为不变。
 	 */
-	bool ContinueToStageB();
+	bool ContinueToStageB(const FString& OverrideInputPath = FString());
 
 	bool IsFinished() const;
 	/** 是否停在阶段 A 等用户确认（此时不该再 Tick 推进，但任务没结束）。 */
@@ -159,6 +166,8 @@ private:
 	FString MakeOutputDir() const;
 	const FComfyImageRef* FindImageForNode(const TArray<FComfyImageRef>& Images, const FString& NodeId) const;
 	void PrepareStageBDownloads();
+	/** 阶段B 到底吃哪张图：覆盖路径优先，否则用本次阶段A 的产物。 */
+	FString GetStageBInputPath() const;
 
 	const UComfyTextureStudioSettings* Settings = nullptr;
 
@@ -180,6 +189,14 @@ private:
 	double StageBStartTime = 0.0;
 	double NextPollTime = 0.0;
 	FString CurrentPromptId;
+
+	/**
+	 * 阶段B 的输入图覆盖（绝对路径，空 = 用 Result.BaseTexturePath）。
+	 *
+	 * 由 ContinueToStageB() 传入、Step_UploadInput() 消费 —— 面板允许用户从历史候选里
+	 * 挑一张继续，这条路径得能表达"用那张"。
+	 */
+	FString StageBInputPathOverride;
 
 	TArray<FComfyImageRef> PendingImages;
 	TArray<FComfyImageRef> PendingDownloads;

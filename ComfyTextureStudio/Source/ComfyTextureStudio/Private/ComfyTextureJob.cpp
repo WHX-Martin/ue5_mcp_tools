@@ -1,9 +1,9 @@
 #include "ComfyTextureJob.h"
 
+#include "ComfyPaths.h"          // 路径解析的唯一实现（曾与 ImportService 各写一份）
 #include "ComfyTextureStudio.h"
 #include "ComfyTextureStudioSettings.h"
 #include "HAL/FileManager.h"
-#include "Interfaces/IPluginManager.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
@@ -204,14 +204,9 @@ void FComfyTextureJob::Fail(EComfyErrorKind Kind, const FString& Message,
 
 FString FComfyTextureJob::ResolvePluginPath(const FString& MaybeRelative) const
 {
-	if (FPaths::IsRelative(MaybeRelative))
-	{
-		if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("ComfyTextureStudio")))
-		{
-			return FPaths::Combine(Plugin->GetBaseDir(), MaybeRelative);
-		}
-	}
-	return MaybeRelative;
+	// 只有一份实现（ComfyPaths）—— 这里曾与 FComfyTextureImportService 各写一遍，
+	// 两份实现分头演化迟早出事。
+	return ComfyPaths::ResolvePluginPath(MaybeRelative);
 }
 
 FString FComfyTextureJob::MakeOutputDir() const
@@ -733,12 +728,17 @@ void FComfyTextureJob::Step_PauseForReview()
 		TEXT("基础贴图已出图。满意就继续生成 PBR，不满意可换种子重出。"));
 }
 
-bool FComfyTextureJob::ContinueToStageB()
+bool FComfyTextureJob::ContinueToStageB(const FString& OverrideInputPath)
 {
 	if (State != EComfyJobState::StageAReady)
 	{
 		return false;
 	}
+
+	// 记下阶段B 要吃哪张图（空 = 本次阶段A 的产物，见 Step_UploadInput）。
+	// 面板允许用户从「历史候选」里挑一张继续：那条路径如果不记下来，
+	// 就会出现"UI 显示第 2 张、实际拿最新那张去反演"的静默错配。
+	StageBInputPathOverride = OverrideInputPath;
 
 	// 阶段 B 有自己的完整超时窗口：重新起算，不把用户审阅花掉的时间算进去。
 	StartTime = FPlatformTime::Seconds();
@@ -749,23 +749,35 @@ bool FComfyTextureJob::ContinueToStageB()
 	return true;
 }
 
+FString FComfyTextureJob::GetStageBInputPath() const
+{
+	return StageBInputPathOverride.IsEmpty() ? Result.BaseTexturePath : StageBInputPathOverride;
+}
+
 // --------------------------------------------------------------------------- //
 // 步骤：上传 → 阶段 B
 // --------------------------------------------------------------------------- //
 
 void FComfyTextureJob::Step_UploadInput()
 {
+	// 喂给阶段B 的那张图：默认是本次阶段A 的产物；面板若指定了历史候选，用指定的那张。
+	const FString FeedPath = GetStageBInputPath();
+
 	TArray<uint8> Bytes;
-	if (!FFileHelper::LoadFileToArray(Bytes, *Result.BaseTexturePath))
+	if (!FFileHelper::LoadFileToArray(Bytes, *FeedPath))
 	{
 		Fail(EComfyErrorKind::LocalIOFailed,
-			FString::Printf(TEXT("读不了阶段A 产物：%s"), *Result.BaseTexturePath), FString(), FString());
+			FString::Printf(TEXT("读不了阶段B 输入图：%s"), *FeedPath), FString(), FString());
 		return;
 	}
 
 	const FString RemoteName = FString::Printf(TEXT("cts_%s.png"), *Params.JobId);
-	SetState(EComfyJobState::Submitting, TEXT("把阶段A 产物投喂给阶段B（POST /upload/image）"));
+	SetState(EComfyJobState::Submitting, FString::Printf(
+		TEXT("把基础贴图投喂给阶段B（%s）"), *FPaths::GetCleanFilename(FeedPath)));
 	bWaiting = true;
+
+	UE_LOG(LogComfyTextureStudio, Log, TEXT("[%s] 阶段B 输入图：%s"),
+		*Params.JobId, *FeedPath);
 
 	Http.UploadImage(Bytes, RemoteName,
 		[this](bool bOk, const FString& UploadedName, const FString& Error)

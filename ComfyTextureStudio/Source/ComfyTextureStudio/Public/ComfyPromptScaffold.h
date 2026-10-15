@@ -81,8 +81,22 @@ namespace ComfyPrompt
 		/** 提交前把三段拼回完整提示词应得的样式，用于自检。 */
 		FString Compose() const { return Join(Prefix, Description, Suffix); }
 
-		/** 骨架丢失的风险提示（空 = 正常）。 */
-		FString GetWarning() const { return Warning; }
+		/**
+		 * 骨架/提示词的风险提示（空 = 正常）。
+		 *
+		 * **未初始化时也返回非空** —— 2026-10-14 的事故里，面板因为工作流文件路径
+		 * 解析失败而压根没调到 ResetFromPrompt，于是 GetWarning() 返回空字符串，
+		 * 面板那条"骨架缺失"的告警显示成了 `骨架缺失（）`，等于没提示。
+		 */
+		FString GetWarning() const
+		{
+			if (!bInitialized)
+			{
+				return TEXT("正向提示词还没从 manifest 载入 —— 提交时只会用你手填的描述"
+					"（没有 LoRA 触发词，也没有光照/细节 tag）。");
+			}
+			return Warning;
+		}
 
 	private:
 		void RebuildFromScaffold();
@@ -92,6 +106,7 @@ namespace ComfyPrompt
 		FString Prefix;
 		FString Suffix;
 		bool bHasScaffold = false;
+		bool bInitialized = false;
 		FString Warning;
 	};
 }

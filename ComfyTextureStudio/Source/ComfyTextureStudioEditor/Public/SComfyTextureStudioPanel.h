@@ -11,6 +11,7 @@
 #pragma once
 
 #include "ComfyHttpClient.h"
+#include "ComfyPreviewFocus.h"
 #include "ComfyPromptScaffold.h"
 #include "ComfyTextureJob.h"
 #include "ComfyImportTypes.h"
@@ -49,7 +50,25 @@ private:
 
 	TSharedRef<SWidget> BuildLabeledRow(const FText& Label, TSharedRef<SWidget> Content, const FText& Tooltip = FText());
 	TSharedRef<SWidget> BuildChannelThumb(const FString& Semantic);
-	TSharedRef<SWidget> BuildTiledPreview(const FString& PngPath, float TileSize);
+
+	/**
+	 * 2×2 平铺自检。
+	 *
+	 * **故意不接收路径**。以前是 `BuildTiledPreview(FocusedPreviewPath, 75)`，lambda 把
+	 * 路径**按值捕获** —— 而这个控件是在 Construct 里建的，那时 FocusedPreviewPath 还是空串，
+	 * 于是平铺预览从建起来那一刻就绑死在空路径上，之后再怎么生成都是空白。
+	 * 现在由 lambda 直接读成员，属性绑定每帧重算，路径一变就跟着变。
+	 */
+	TSharedRef<SWidget> BuildTiledPreview(float TileSize);
+
+	/**
+	 * 历史候选里的一项（Index 是「第几新」，0 = 最新）。
+	 *
+	 * StageAHistory 是动态的（最多 8 项，新的插到头部），所以这里按**下标**建固定数量的
+	 * 槽位：每帧由 lambda 去查 `StageAHistory[Index]`，越界就折叠。
+	 * 这样既不需要维护 ListView 的数据源刷新，也不会在构造期把当时的内容固化成常量。
+	 */
+	TSharedRef<SWidget> BuildHistoryCandidate(int32 Index);
 
 	// ------------------------------------------------------------ 任务控制 //
 	void StartStageA(bool bNewSeed);
@@ -91,6 +110,13 @@ private:
 	const FSlateBrush* GetPreviewBrush(const FString& PngPath);
 	void ReleasePreviewTextures();
 
+	/** 缓存太多时淘汰最旧的（**只淘汰文件仍在磁盘上的**，见实现里的注释）。 */
+	void TrimPreviewCache();
+
+	// ------------------------------------------------------------ 预览焦点 //
+	/** 大图下面那行「当前预览：xxx.png」。 */
+	FText GetFocusedPreviewText() const;
+
 	/**
 	 * 在独立窗口里放大查看某张 PNG。
 	 *
@@ -129,10 +155,16 @@ private:
 	/** 任务开始时刻，仅用于状态栏里的"已耗时"。 */
 	double JobStartTime = 0.0;
 
-	/** 阶段 A 的历史候选（PRD §7.2 的 #1~#4）。只留路径，缩略图按需加载。 */
-	TArray<FString> StageAHistory;
-	/** 当前在预览区展示的那张（默认取最新）。 */
-	FString FocusedPreviewPath;
+	/**
+	 * 右栏预览的状态：阶段 A 历史候选 + 当前焦点。
+	 *
+	 * 状态迁移全在 ComfyPreview::FStageAHistory 里（Runtime 模块，不依赖 Slate），
+	 * 由 `-TestPreviewFocus` 守着。**不要把这些规则再写回面板里**：
+	 * 「新结果要跟过去」这条曾经写成 `if (FocusedPreviewPath.IsEmpty())`，
+	 * 结果第二次之后的产物永远进不了预览 —— 而这类错误 UI 看着完全正常
+	 * （有图、有缩略图，只是那张图是旧的），只有断言能钉住它。
+	 */
+	ComfyPreview::FStageAHistory PreviewHistory;
 
 	/** 6 个通道的本地 PNG 路径（阶段 B 完成后填充）。 */
 	TMap<FString, FString> ChannelPngPaths;
@@ -150,6 +182,14 @@ private:
 	 */
 	TMap<FString, TSharedPtr<FComfyPreviewTexture>> PreviewCache;
 
+	/**
+	 * PreviewCache 的插入顺序（TMap 本身不保序），用于淘汰最旧的那些。
+	 *
+	 * 历史候选会让缓存里同时压着 8 张阶段A 贴图，再加上 6 张通道图 ——
+	 * 1024² 的 RGBA + mip 链约 5 MB/张，不设上限的话反复换种子会让内存一路涨。
+	 */
+	TArray<FString> PreviewLoadOrder;
+
 	// ---- 阶段 A 参数 ----
 	/**
 	 * 正向提示词的编辑状态（固定骨架 + 可编辑的描述）。
@@ -161,6 +201,15 @@ private:
 	 */
 	ComfyPrompt::FComfyPromptEditor PromptEditor;
 	FString NegativePrompt;
+
+	/**
+	 * 提示词模板装载失败的原因（空 = 正常）。
+	 *
+	 * 独立于 PromptEditor 的警告：这个说的是"文件/路径层面的失败"，
+	 * 而不是"骨架拆不出来"。2026-10-14 的教训是这类失败只在日志里留一行 Warning，
+	 * 面板上完全看不见 —— 用户看到的是"出图不对"，无从联想。
+	 */
+	FString PromptLoadError;
 
 	/** manifest 里的采样器/调度默认值 —— 探测拿到真实枚举后要回退到它，而不是列表第 0 项。 */
 	FString SamplerDefault = TEXT("dpmpp_2m");
